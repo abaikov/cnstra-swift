@@ -27,21 +27,21 @@ We follow ERG (Event → Reaction → Graph), not a raw Flux/event-bus.
 ### Neurons
 Units of logic with clear DI and boundaries:
 
-- ID — unique `name`
+- Name — unique `name`
 - Axon — the neuron's output channels (its collaterals)
 - Dendrites — input receptors (typed reactions bound to specific collaterals)
 
 ### Collaterals
 Typed output channels that mint signals:
 
-- ID — string identifier (e.g., "user:created")
+- Type — string identifier (e.g., "user:created")
 - Payload — the data carried by the signal
 - `createSignal(payload)` → `CNSSignal<Payload>`
 
 ### Signals
 The data structures that flow through the system:
 
-- `collateralType` — string ID of the collateral that created this signal
+- `collateralType` — string type of the collateral that created this signal
 - `payload` — the typed data being transmitted
 
 ## 🚀 Quick Start
@@ -287,7 +287,7 @@ cns.stimulate(input.createSignal((increment: 5)))
 
 ## 🧠 Topology & Performance
 
-- Subscriber/owner indexes: `getSubscribers`, `getParentNeuronByCollateralId`.
+- Subscriber/owner indexes: `getSubscribers`, `getParentNeuronByCollateralType`.
 - Strongly Connected Components (SCC): Tarjan SCC, SCC DAG, ancestor precompute.
 - `getSCCSetByNeuronName`, `getSccIndexByNeuronName`, `canNeuronBeGuaranteedDone`.
 - Auto context cleanup (optional) based on SCC.

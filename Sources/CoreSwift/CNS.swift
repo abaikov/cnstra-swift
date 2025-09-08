@@ -22,14 +22,14 @@ public final class CNSCollateral<Payload> {
     }
 }
 
-// Strongly-typed collateral identifier (phantom typed)
-public struct CNSCollateralID<Payload> {
+// Strongly-typed collateral type (phantom typed)
+public struct CNSCollateralType<Payload> {
     public let rawValue: String
     public init(_ rawValue: String) { self.rawValue = rawValue }
 }
 
 public extension CNSCollateral {
-    var id: CNSCollateralID<Payload> { CNSCollateralID<Payload>(self.type) }
+    var typeKey: CNSCollateralType<Payload> { CNSCollateralType<Payload>(self.type) }
 }
 
 @dynamicMemberLookup
@@ -55,15 +55,15 @@ public final class CNSAxon {
     }
     
     public func get<T>(_ type: String, _ payloadType: T.Type) -> CNSCollateral<T>? { byType[type] as? CNSCollateral<T> }
-    public func get<T>(_ id: CNSCollateralID<T>) -> CNSCollateral<T>? { byType[id.rawValue] as? CNSCollateral<T> }
+    public func get<T>(_ type: CNSCollateralType<T>) -> CNSCollateral<T>? { byType[type.rawValue] as? CNSCollateral<T> }
     
     public func getForce<T>(_ type: String, _ payloadType: T.Type) -> CNSCollateral<T> {
         if let c = byType[type] as? CNSCollateral<T> { return c }
         preconditionFailure("[CNSAxon] Missing collateral '\(type)' of type \(T.self)")
     }
-    public func getForce<T>(_ id: CNSCollateralID<T>) -> CNSCollateral<T> {
-        if let c = byType[id.rawValue] as? CNSCollateral<T> { return c }
-        preconditionFailure("[CNSAxon] Missing collateral '\(id.rawValue)' of type \(T.self)")
+    public func getForce<T>(_ type: CNSCollateralType<T>) -> CNSCollateral<T> {
+        if let c = byType[type.rawValue] as? CNSCollateral<T> { return c }
+        preconditionFailure("[CNSAxon] Missing collateral '\(type.rawValue)' of type \(T.self)")
     }
     
     // Force unwrap version for when you're sure the collateral exists
@@ -84,7 +84,7 @@ public final class CNSAxon {
         register(collateral)
         return collateral
     }
-    public func register<T>(_ id: CNSCollateralID<T>) { byType[id.rawValue] = CNSCollateral<T>(id.rawValue) }
+    public func register<T>(_ type: CNSCollateralType<T>) { byType[type.rawValue] = CNSCollateral<T>(type.rawValue) }
 
     // Dynamic member access: axon.output -> CNSCollateral<T>
     public subscript<T>(dynamicMember member: String) -> CNSCollateral<T> {
@@ -266,8 +266,8 @@ public struct CNSDendrite {
         }
     }
 
-    // Throwing response routed to a dedicated error collateral (by ID, resolved at runtime from axon)
-    public init<Input, E: Error>(inputCollateral: CNSCollateral<Input>, errorCollateralId: CNSCollateralID<E>, throwingResponse: @escaping (_ payload: Input, _ axon: CNSAxon, _ ctx: CNSLocalCtx) throws -> Any?) {
+    // Throwing response routed to a dedicated error collateral (by type, resolved at runtime from axon)
+    public init<Input, E: Error>(inputCollateral: CNSCollateral<Input>, errorCollateralType: CNSCollateralType<E>, throwingResponse: @escaping (_ payload: Input, _ axon: CNSAxon, _ ctx: CNSLocalCtx) throws -> Any?) {
         self.inputCollateralType = inputCollateral.type
         self.response = { payload, axon, ctx in
             do {
@@ -277,7 +277,7 @@ public struct CNSDendrite {
                 guard let p = payload as? Input else { return nil }
                 return try throwingResponse(p, axon, ctx)
             } catch let e as E {
-                let ch: CNSCollateral<E> = axon.getForce(errorCollateralId)
+                let ch: CNSCollateral<E> = axon.getForce(errorCollateralType)
                 return ch.createSignal(e)
             } catch {
                 return nil
@@ -366,7 +366,7 @@ public final class CNS {
 
     // Indexes/topology
     private var subIndex: [String: [(CNSNeuron, CNSDendrite)]] = [:]
-    private var parentNeuronByCollateralId: [String: CNSNeuron] = [:]
+    private var parentNeuronByCollateralType: [String: CNSNeuron] = [:]
     public private(set) var stronglyConnectedComponents: [Set<String>] = []
     private var neuronToSCC: [String: Int] = [:]
     private var sccDag: [Int: Set<Int>] = [:]
@@ -401,12 +401,12 @@ public final class CNS {
     // MARK: Indexes
     private func buildIndexes() {
         subIndex.removeAll()
-        parentNeuronByCollateralId.removeAll()
+        parentNeuronByCollateralType.removeAll()
         for n in neurons {
             for d in n.dendrites {
                 subIndex[d.inputCollateralType, default: []].append((n, d))
             }
-            for t in n.axon.byType.keys { parentNeuronByCollateralId[t] = n }
+            for t in n.axon.byType.keys { parentNeuronByCollateralType[t] = n }
         }
     }
 
@@ -414,15 +414,15 @@ public final class CNS {
         return subIndex[collateralType] ?? []
     }
 
-    public func getParentNeuronByCollateralId(collateralType: String) -> CNSNeuron? {
-        return parentNeuronByCollateralId[collateralType]
+    public func getParentNeuronByCollateralType(collateralType: String) -> CNSNeuron? {
+        return parentNeuronByCollateralType[collateralType]
     }
 
     // MARK: SCC Graph
     private func buildNeuronGraph() -> [String: Set<String>] {
         var graph: [String: Set<String>] = [:]
-        let neuronIds = neurons.map { $0.name }
-        neuronIds.forEach { graph[$0] = Set<String>() }
+        let neuronNames = neurons.map { $0.name }
+        neuronNames.forEach { graph[$0] = Set<String>() }
         // edges: neuron -> neurons it can reach via its axon's collaterals
         for n in neurons {
             var reachable = Set<String>()
