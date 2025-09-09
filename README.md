@@ -1,12 +1,12 @@
-# CNStraSwift
+# CNStra - Swift SDK
 
 Graph-routed, type-safe orchestration for reactive Swift apps — no global event bus.
 
 This is a Swift implementation of the original [CNStra TypeScript library](https://www.npmjs.com/package/@cnstra/core) ([GitHub](https://github.com/abaikov/cnstra)).
 
-## 🧠 What is CNStraSwift?
+## 🧠 What is CNStra?
 
-CNStraSwift models your app as a typed neuron graph.
+CNStra models your app as a typed neuron graph.
 You explicitly start a run with `cns.stimulate(...)`; CNStra then performs a deterministic, hop-bounded traversal from collateral → dendrite → returned signal, step by step.
 
 - Zero dependencies: suitable for iOS, macOS, tvOS, watchOS, server-side Swift.
@@ -38,6 +38,8 @@ Typed output channels that mint signals:
 - Payload — the data carried by the signal
 - `createSignal(payload)` → `CNSSignal<Payload>`
 
+- Strongly-typed collateral type key: `CNSCollateralType<Payload>` is a phantom type used for safer registration/lookup. You can derive it from a collateral via `.typeKey`.
+
 ### Signals
 The data structures that flow through the system:
 
@@ -46,10 +48,10 @@ The data structures that flow through the system:
 
 ## 🚀 Quick Start
 
-Add CNStraSwift as a SwiftPM dependency and import the module where needed.
+Add CNStra as a SwiftPM dependency and import the module where needed.
 
 ```swift
-import CNStraSwift
+import CNStra
 
 // Define collaterals (communication channels)
 let userCreated = CNSCollateral<(id: String, name: String)>("user:created")
@@ -86,6 +88,13 @@ cns.stimulate(userCreated.createSignal((id: "123", name: "John Doe")))
 ```swift
 let userEvent = CNSCollateral<(userId: String)>("user:event")
 let simpleEvent = CNSCollateral<Void>("simple:event")
+
+// Phantom typed type key
+struct MyError: Error {}
+let errorType = CNSCollateralType<MyError>("error")
+
+let errorCollateral = CNSCollateral<MyError>("error")
+let derivedTypeKey: CNSCollateralType<MyError> = errorCollateral.typeKey
 ```
 
 ### Axon DSL and access
@@ -101,6 +110,11 @@ let axon = CNSAxon.make { def in
 let forced: CNSCollateral<String> = axon.output
 // Safe (optional):
 let safe: CNSCollateral<String>? = axon.safe.output
+
+// Register/get by type key
+axon.register(errorType)
+let errorChOpt: CNSCollateral<MyError>? = axon.get(errorType)
+let errorCh: CNSCollateral<MyError> = axon.getForce(errorType)
 ```
 
 ### Neuron and Dendrite
@@ -310,6 +324,21 @@ Errors are delivered via `onResponse.error`. Alternatively, use throwing dendrit
 let opts = CNSStimulationOptions<Int, String>(onResponse: { r in
     if let err = r.error { print("Error: \(err)") }
 })
+
+// Typed error routing via collateral type key
+struct MyError: Error {}
+let input = CNSCollateral<Int>("in")
+let errorType = CNSCollateralType<MyError>("error")
+let errorOut = CNSCollateral<MyError>("error")
+let axon = CNSAxon()
+axon.register(errorOut)
+
+let d = CNSDendrite(
+  inputCollateral: input,
+  errorCollateralType: errorType
+) { (value: Int, axon, _) in
+  throw MyError()
+}
 ```
 
 ## 🔧 Advanced Configuration
@@ -324,4 +353,4 @@ let n = CNSNeuron(name: "worker", axon: ax, dendrites: ds, concurrency: 2)
 
 ---
 
-CNStraSwift provides deterministic, type‑safe orchestration without the complexity of traditional event systems. Build reliable, maintainable reactive applications with clear data flow and predictable behavior.
+CNStra provides deterministic, type‑safe orchestration without the complexity of traditional event systems. Build reliable, maintainable reactive applications with clear data flow and predictable behavior.

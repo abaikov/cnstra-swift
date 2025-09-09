@@ -2,16 +2,16 @@
 import PackageDescription
 
 let package = Package(
-    name: "CNStraSwift",
+    name: "CNStra",
     platforms: [
         .iOS(.v14), .macOS(.v11), .tvOS(.v14), .watchOS(.v7)
     ],
     products: [
-        .library(name: "CNStraSwift", targets: ["CNStraSwift"])
+        .library(name: "CNStra", targets: ["CNStra"])
     ],
     targets: [
-        .target(name: "CNStraSwift", path: "Sources/CoreSwift"),
-        .testTarget(name: "CoreSwiftTests", dependencies: ["CNStraSwift"], path: "Tests/CoreSwiftTests")
+        .target(name: "CNStra", path: "Sources/CoreSwift"),
+        .testTarget(name: "CoreSwiftTests", dependencies: ["CNStra"], path: "Tests/CoreSwiftTests")
     ]
 )
 

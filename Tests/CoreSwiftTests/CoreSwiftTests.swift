@@ -1,5 +1,5 @@
 import XCTest
-@testable import CNStraSwift
+@testable import CNStra
 
 final class CoreSwiftTests: XCTestCase {
     // Cleaned: remove unused helper
