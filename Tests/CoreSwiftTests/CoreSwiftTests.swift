@@ -2,59 +2,52 @@ import XCTest
 @testable import CNStra
 
 final class CoreSwiftTests: XCTestCase {
-    // Cleaned: remove unused helper
     func testBasicFlow() {
-        let input = CNSCollateral<String>("input")
-        let axon = CNSAxon.make { def in
-            def.output(String.self)
-        }
-        
-        // Type-safe dendrite with full axon access
-        let d = CNSDendrite(inputCollateral: input) { (payload, axon, _) in
+        let input = CNSCollateral<String>()
+        let output = CNSCollateral<String>()
+        let axon = CNSAxon(output)
+
+        let d = CNSDendrite(inputCollateral: input) { (payload: String?, _, _) in
             guard let stringPayload = payload else { return nil }
-            // Dynamic member access
-            return axon.output.createSignal(stringPayload)
+            return output.createSignal(stringPayload)
         }
-        let n = CNSNeuron(name: "N", axon: axon, dendrites: [d])
+        let n = CNSNeuron(axon: axon, dendrites: [d])
         let cns = CNS([n])
 
-        var seen: [String] = []
+        var seen: [ObjectIdentifier] = []
         _ = cns.addResponseListener { r in
-            if let o = r.output as? CNSSignal<String> { seen.append(o.collateralType) }
-            else if let i = r.input as? CNSSignal<String> { seen.append(i.collateralType) }
+            if let o = r.outputSignal as? CNSSignal<String> { seen.append(ObjectIdentifier(o.collateral)) }
+            else if let i = r.inputSignal as? CNSSignal<String> { seen.append(ObjectIdentifier(i.collateral)) }
         }
-        cns.stimulate(input.createSignal("hi"))
-        XCTAssertEqual(seen, ["input", "output"])
+        _ = cns.stimulate(input.createSignal("hi"))
+        XCTAssertEqual(seen, [ObjectIdentifier(input), ObjectIdentifier(output)])
     }
 
     func testComplexPayloadsAndDebugOrder() {
         struct User { let id: Int; let name: String }
         struct Profile { let id: Int; let nickname: String }
-        let input = CNSCollateral<User>("user")
-        let axon = CNSAxon.make { def in
-            def.profile(Profile.self)
-            def.log(String.self)
-        }
-        // D1: User -> Profile
-        let d1 = CNSDendrite(inputCollateral: input) { (payload: User?, axon, _) in
+        let input = CNSCollateral<User>()
+        let profile = CNSCollateral<Profile>()
+        let log = CNSCollateral<String>()
+        let axon = CNSAxon(profile, log)
+        let d1 = CNSDendrite(inputCollateral: input) { (payload: User?, _, _) in
             guard let u = payload else { return nil }
-            return axon.profile.createSignal(Profile(id: u.id, nickname: u.name.lowercased()))
+            return profile.createSignal(Profile(id: u.id, nickname: u.name.lowercased()))
         }
-        // D2: Profile -> log
-        let d2 = CNSDendrite(inputCollateral: CNSCollateral<Profile>("profile")) { (payload: Profile?, axon, _) in
+        let d2 = CNSDendrite(inputCollateral: profile) { (payload: Profile?, _, _) in
             guard let p = payload else { return nil }
-            return axon.log.createSignal("profile: #\(p.id) \(p.nickname)")
+            return log.createSignal("profile: #\(p.id) \(p.nickname)")
         }
-        let cns = CNS([CNSNeuron(name: "Pipe", axon: axon, dendrites: [d1, d2])])
+        let cns = CNS([CNSNeuron(axon: axon, dendrites: [d1, d2])])
 
         var seen: [String] = []
         var lastQueueLengths: [Int] = []
         _ = cns.addResponseListener { r in
-            if r.output is CNSSignal<Profile> { seen.append("profile:") }
-            if r.output is CNSSignal<String> { seen.append("log:") }
+            if r.outputSignal is CNSSignal<Profile> { seen.append("profile:") }
+            if r.outputSignal is CNSSignal<String> { seen.append("log:") }
             lastQueueLengths.append(r.queueLength)
         }
-        cns.stimulate(input.createSignal(User(id: 1, name: "Andrei")))
+        _ = cns.stimulate(input.createSignal(User(id: 1, name: "Andrei")))
         XCTAssertEqual(seen, ["profile:", "log:"])
         // queueLength should be 0 only on the last response
         XCTAssertTrue(lastQueueLengths.last == 0)
@@ -62,377 +55,323 @@ final class CoreSwiftTests: XCTestCase {
     }
 
     func testAbortSignals() {
-        let input = CNSCollateral<Int>("in")
-        let axon = CNSAxon.make { def in def.out(String.self) }
+        let input = CNSCollateral<Int>()
+        let out = CNSCollateral<String>()
+        let axon = CNSAxon(out)
         let cancel = CNSCancellationToken()
         var passed = false
-        let d = CNSDendrite(inputCollateral: input) { (p: Int?, axon, ctx) in
+        let d = CNSDendrite(inputCollateral: input) { (p: Int?, _, ctx) in
             guard let v = p else { return nil }
-            if v == 1 { ctx.abortToken?.cancel() }
+            if v == 1 { (ctx.abortSignal as? CNSCancellationToken)?.cancel() }
             passed = true
-            return axon.out.createSignal("x")
+            return out.createSignal("x")
         }
-        let cns = CNS([CNSNeuron(name: "N", axon: axon, dendrites: [d])])
-        let opts = CNSStimulationOptions<Int, String>(onResponse: nil, cancelToken: cancel)
-        cns.stimulate(input.createSignal(1), opts)
+        let cns = CNS([CNSNeuron(axon: axon, dendrites: [d])])
+        let opts = CNSStimulationOptions<Int, String>(onResponse: nil, abortSignal: cancel)
+        _ = cns.stimulate(input.createSignal(1), opts)
         // We cancelled quickly; handler ran, but no further queue appends
         XCTAssertTrue(passed)
     }
 
     func testContextPropagation() {
-        let input = CNSCollateral<Int>("in")
-        let axon = CNSAxon.make { def in def.mid(Int.self); def.out(Int.self) }
-        let d1 = CNSDendrite(inputCollateral: input) { (p: Int?, axon, ctx) in
+        let input = CNSCollateral<Int>()
+        let mid = CNSCollateral<Int>()
+        let out = CNSCollateral<Int>()
+        let axon = CNSAxon(mid, out)
+        let d1 = CNSDendrite(inputCollateral: input) { (p: Int?, _, ctx) in
             ctx.set( (p ?? 0) + 1 )
-            return axon.mid.createSignal((p ?? 0) + 10)
+            return mid.createSignal((p ?? 0) + 10)
         }
-        let d2 = CNSDendrite(inputCollateral: CNSCollateral<Int>("mid")) { (p: Int?, axon, ctx) in
+        let d2 = CNSDendrite(inputCollateral: mid) { (p: Int?, _, ctx) in
             let local = (ctx.get() as? Int) ?? -1
-            return axon.out.createSignal((p ?? 0) + local)
+            return out.createSignal((p ?? 0) + local)
         }
-        let cns = CNS([CNSNeuron(name: "AB", axon: axon, dendrites: [d1, d2])])
+        let cns = CNS([CNSNeuron(axon: axon, dendrites: [d1, d2])])
         var result: Int?
-        _ = cns.addResponseListener { r in if let o = r.output as? CNSSignal<Int> { result = o.payload } }
-        cns.stimulate(input.createSignal(5))
+        _ = cns.addResponseListener { r in if let o = r.outputSignal as? CNSSignal<Int> { result = o.payload } }
+        _ = cns.stimulate(input.createSignal(5))
         XCTAssertEqual(result, 5 + 10 + (5 + 1))
     }
 
     func testConcurrencyWithinRun() {
-        let input = CNSCollateral<Int>("in")
-        let axon = CNSAxon.make { def in def.mid(Int.self); def.out(Int.self) }
-        let d1 = CNSDendrite(inputCollateral: input) { (p: Int?, axon, _) in
-            return axon.mid.createSignal((p ?? 0))
+        let input = CNSCollateral<Int>()
+        let mid = CNSCollateral<Int>()
+        let out = CNSCollateral<Int>()
+        let axon = CNSAxon(mid, out)
+        let d1 = CNSDendrite(inputCollateral: input) { (p: Int?, _, _) in
+            return mid.createSignal((p ?? 0))
         }
-        let d2 = CNSDendrite(inputCollateral: CNSCollateral<Int>("mid")) { (p: Int?, axon, _) in
-            return axon.out.createSignal((p ?? 0))
+        let d2 = CNSDendrite(inputCollateral: mid) { (p: Int?, _, _) in
+            return out.createSignal((p ?? 0))
         }
-        let n = CNSNeuron(name: "N", axon: axon, dendrites: [d1, d2], concurrency: 1)
+        let n = CNSNeuron(axon: axon, dendrites: [d1, d2], concurrency: 1)
         let cns = CNS([n])
         var count = 0
-        _ = cns.addResponseListener { r in if r.output is CNSSignal<Int> { count += 1 } }
-        cns.stimulate(input.createSignal(1))
+        _ = cns.addResponseListener { r in
+            if let s = r.outputSignal as? CNSSignal<Int>, s.collateral !== input { count += 1 }
+        }
+        _ = cns.stimulate(input.createSignal(1))
         XCTAssertEqual(count, 2)
     }
 
     func testConcurrencyAcrossMultipleRuns() {
-        let input = CNSCollateral<Int>("in")
-        let axon = CNSAxon.make { def in def.out(Int.self) }
-        let d = CNSDendrite(inputCollateral: input) { (p: Int?, axon, _) in
-            return axon.out.createSignal((p ?? 0))
+        let input = CNSCollateral<Int>()
+        let out = CNSCollateral<Int>()
+        let axon = CNSAxon(out)
+        let d = CNSDendrite(inputCollateral: input) { (p: Int?, _, _) in
+            return out.createSignal((p ?? 0))
         }
-        let n = CNSNeuron(name: "N", axon: axon, dendrites: [d], concurrency: 1)
+        let n = CNSNeuron(axon: axon, dendrites: [d], concurrency: 1)
         let cns = CNS([n])
         var total = 0
-        _ = cns.addResponseListener { r in if let s = r.output as? CNSSignal<Int> { total += s.payload ?? 0 } }
-        for i in 0..<100 { cns.stimulate(input.createSignal(i)) }
+        _ = cns.addResponseListener { r in
+            if let s = r.outputSignal as? CNSSignal<Int>, s.collateral !== input { total += s.payload ?? 0 }
+        }
+        for i in 0..<100 { _ = cns.stimulate(input.createSignal(i)) }
         XCTAssertEqual(total, (0..<100).reduce(0,+))
     }
     
     func testTypeSafeDendrite() {
-        let input = CNSCollateral<String>("input")
-        let axon = CNSAxon.make { def in
-            def.output(Int.self)
-        }
-        
-        // Type-safe dendrite with different input/output types
-        let d = CNSDendrite(inputCollateral: input) { (payload: String?, axon, _) in
+        let input = CNSCollateral<String>()
+        let output = CNSCollateral<Int>()
+        let axon = CNSAxon(output)
+        let d = CNSDendrite(inputCollateral: input) { (payload: String?, _, _) in
             guard let stringPayload = payload else { return nil }
-            // Dynamic member access to typed output
-            return axon.output.createSignal(stringPayload.count) // Convert string length to int
+            return output.createSignal(stringPayload.count)
         }
         
-        let n = CNSNeuron(name: "N", axon: axon, dendrites: [d])
+        let n = CNSNeuron(axon: axon, dendrites: [d])
         let cns = CNS([n])
         
         var result: Int?
         _ = cns.addResponseListener { r in
-            if let outputSignal = r.output as? CNSSignal<Int> {
+            if let outputSignal = r.outputSignal as? CNSSignal<Int> {
                 result = outputSignal.payload
             }
         }
         
-        cns.stimulate(input.createSignal("hello"))
+        _ = cns.stimulate(input.createSignal("hello"))
         XCTAssertEqual(result, 5) // "hello" has 5 characters
     }
     
     func testDendriteWithAxonCollateralAccess() {
-        let input = CNSCollateral<String>("input")
-        let output = CNSCollateral<String>("output")
-        let axon = CNSAxon()
-        axon.register(output)
-        
-        // Dendrite has full access to the axon
-        let d = CNSDendrite(inputCollateral: input) { (payload, axon, _) in
+        let input = CNSCollateral<String>()
+        let output = CNSCollateral<String>()
+        let axon = CNSAxon(output)
+        let d = CNSDendrite(inputCollateral: input) { (payload: String?, _, _) in
             guard let stringPayload = payload else { return nil }
-            // Dynamic member access on axon
-            return axon.output.createSignal("processed: \(stringPayload)")
+            return output.createSignal("processed: \(stringPayload)")
         }
         
-        let n = CNSNeuron(name: "Processor", axon: axon, dendrites: [d])
+        let n = CNSNeuron(axon: axon, dendrites: [d])
         let cns = CNS([n])
         
         var result: String?
         _ = cns.addResponseListener { r in
-            if let outputSignal = r.output as? CNSSignal<String> {
+            if let outputSignal = r.outputSignal as? CNSSignal<String> {
                 result = outputSignal.payload
             }
         }
         
-        cns.stimulate(input.createSignal("test"))
+        _ = cns.stimulate(input.createSignal("test"))
         XCTAssertEqual(result, "processed: test")
     }
     
     func testMultipleAxonCollaterals() {
-        let input = CNSCollateral<String>("input")
-        let axon = CNSAxon.make { def in
-            def.stringOutput(String.self)
-            def.intOutput(Int.self)
-        }
-        
-        // Dendrite can choose which output collateral to use from the axon
-        let d = CNSDendrite(inputCollateral: input) { (payload, axon, _) in
+        let input = CNSCollateral<String>()
+        let stringOutput = CNSCollateral<String>()
+        let intOutput = CNSCollateral<Int>()
+        let axon = CNSAxon(stringOutput, intOutput)
+        let d = CNSDendrite(inputCollateral: input) { (payload: String?, _, _) in
             guard let stringPayload = payload else { return nil }
-            // Use dynamic member
-            return axon.stringOutput.createSignal("processed: \(stringPayload)")
+            return stringOutput.createSignal("processed: \(stringPayload)")
         }
         
-        let n = CNSNeuron(name: "MultiOutput", axon: axon, dendrites: [d])
+        let n = CNSNeuron(axon: axon, dendrites: [d])
         let cns = CNS([n])
         
         var stringResult: String?
         var intResult: Int?
         _ = cns.addResponseListener { r in
-            if let outputSignal = r.output as? CNSSignal<String> {
+            if let outputSignal = r.outputSignal as? CNSSignal<String> {
                 stringResult = outputSignal.payload
-            } else if let outputSignal = r.output as? CNSSignal<Int> {
+            } else if let outputSignal = r.outputSignal as? CNSSignal<Int> {
                 intResult = outputSignal.payload
             }
         }
         
-        cns.stimulate(input.createSignal("test"))
+        _ = cns.stimulate(input.createSignal("test"))
         XCTAssertEqual(stringResult, "processed: test")
         XCTAssertNil(intResult) // No int output in this case
     }
     
     func testMultipleOutputCollaterals() {
-        let input = CNSCollateral<String>("input")
-        let axon = CNSAxon.make { def in
-            def.stringOutput(String.self)
-            def.intOutput(Int.self)
-        }
-        
-        // Two dendrites using different output collaterals from the same axon
-        let stringDendrite = CNSDendrite(inputCollateral: input) { (payload, axon, _) in
+        let input = CNSCollateral<String>()
+        let stringOutput = CNSCollateral<String>()
+        let intOutput = CNSCollateral<Int>()
+        let axon = CNSAxon(stringOutput, intOutput)
+        let stringDendrite = CNSDendrite(inputCollateral: input) { (payload: String?, _, _) in
             guard let stringPayload = payload else { return nil }
-            return axon.stringOutput.createSignal("string: \(stringPayload)")
+            return stringOutput.createSignal("string: \(stringPayload)")
         }
-        
-        let intDendrite = CNSDendrite(inputCollateral: input) { (payload, axon, _) in
+        let intDendrite = CNSDendrite(inputCollateral: input) { (payload: String?, _, _) in
             guard let stringPayload = payload else { return nil }
-            return axon.intOutput.createSignal(stringPayload.count)
+            return intOutput.createSignal(stringPayload.count)
         }
         
-        let n = CNSNeuron(name: "MultiOutput", axon: axon, dendrites: [stringDendrite, intDendrite])
+        let n = CNSNeuron(axon: axon, dendrites: [stringDendrite, intDendrite])
         let cns = CNS([n])
         
         var stringResult: String?
         var intResult: Int?
         _ = cns.addResponseListener { r in
-            if let outputSignal = r.output as? CNSSignal<String> {
+            if let outputSignal = r.outputSignal as? CNSSignal<String> {
                 stringResult = outputSignal.payload
-            } else if let outputSignal = r.output as? CNSSignal<Int> {
+            } else if let outputSignal = r.outputSignal as? CNSSignal<Int> {
                 intResult = outputSignal.payload
             }
         }
         
-        cns.stimulate(input.createSignal("hello"))
+        _ = cns.stimulate(input.createSignal("hello"))
         XCTAssertEqual(stringResult, "string: hello")
         XCTAssertEqual(intResult, 5)
     }
     
     func testDendriteUsingMultipleAxonCollaterals() {
-        let input = CNSCollateral<String>("input")
-        let axon = CNSAxon.make { def in
-            def.stringOutput(String.self)
-            def.intOutput(Int.self)
-            def.boolOutput(Bool.self)
-        }
-        
-        // Dendrite that uses multiple collaterals from the same axon
-        let d = CNSDendrite(inputCollateral: input) { (payload, axon, _) in
+        let input = CNSCollateral<String>()
+        let stringOutput = CNSCollateral<String>()
+        let intOutput = CNSCollateral<Int>()
+        let boolOutput = CNSCollateral<Bool>()
+        let axon = CNSAxon(stringOutput, intOutput, boolOutput)
+        let d = CNSDendrite(inputCollateral: input) { (payload: String?, axon, _) in
             guard let stringPayload = payload else { return nil }
-            
-            // Much cleaner via dynamic members
-            let stringCollateral: CNSCollateral<String>? = axon.safe.stringOutput
-            let intCollateral: CNSCollateral<Int>? = axon.safe.intOutput
-            let boolCollateral: CNSCollateral<Bool>? = axon.safe.boolOutput
-            
-            // Return the first available signal (in practice, you might want to return multiple signals)
-            if let stringCollateral = stringCollateral {
-                return stringCollateral.createSignal("processed: \(stringPayload)")
-            } else if let intCollateral = intCollateral {
-                return intCollateral.createSignal(stringPayload.count)
-            } else if let boolCollateral = boolCollateral {
-                return boolCollateral.createSignal(!stringPayload.isEmpty)
+            if axon.contains(stringOutput) {
+                return stringOutput.createSignal("processed: \(stringPayload)")
+            } else if axon.contains(intOutput) {
+                return intOutput.createSignal(stringPayload.count)
+            } else if axon.contains(boolOutput) {
+                return boolOutput.createSignal(!stringPayload.isEmpty)
             }
             return nil
         }
         
-        let n = CNSNeuron(name: "MultiCollateral", axon: axon, dendrites: [d])
+        let n = CNSNeuron(axon: axon, dendrites: [d])
         let cns = CNS([n])
         
         var stringResult: String?
         var intResult: Int?
         var boolResult: Bool?
         _ = cns.addResponseListener { r in
-            if let outputSignal = r.output as? CNSSignal<String> {
+            if let outputSignal = r.outputSignal as? CNSSignal<String> {
                 stringResult = outputSignal.payload
-            } else if let outputSignal = r.output as? CNSSignal<Int> {
+            } else if let outputSignal = r.outputSignal as? CNSSignal<Int> {
                 intResult = outputSignal.payload
-            } else if let outputSignal = r.output as? CNSSignal<Bool> {
+            } else if let outputSignal = r.outputSignal as? CNSSignal<Bool> {
                 boolResult = outputSignal.payload
             }
         }
         
-        cns.stimulate(input.createSignal("test"))
+        _ = cns.stimulate(input.createSignal("test"))
         XCTAssertEqual(stringResult, "processed: test")
         XCTAssertNil(intResult)
         XCTAssertNil(boolResult)
     }
     
-    func testAxonConvenienceMethods() {
-        let input = CNSCollateral<String>("input")
-        let axon = CNSAxon.make { def in
-            def.stringOutput(String.self)
-            def.intOutput(Int.self)
-        }
-        
-        // Test safe access (returns optional)
-        let d1 = CNSDendrite(inputCollateral: input) { (payload, axon, _) in
-            guard let stringPayload = payload else { return nil }
-            // Safe access - returns optional
-            guard let outputCollateral: CNSCollateral<String> = axon.get("stringOutput", String.self) else { return nil }
-            return outputCollateral.createSignal("safe: \(stringPayload)")
-        }
-        
-        // Test direct access (force unwrap - use when you're sure it exists)
-        let d2 = CNSDendrite(inputCollateral: input) { (payload, axon, _) in
-            guard let stringPayload = payload else { return nil }
-            // Direct access - no optional, but will crash if collateral doesn't exist
-            return axon.getForce("stringOutput", String.self).createSignal("direct: \(stringPayload)")
-        }
-        
-        let n = CNSNeuron(name: "ConvenienceTest", axon: axon, dendrites: [d1, d2])
-        let cns = CNS([n])
-        
-        var results: [String] = []
-        _ = cns.addResponseListener { r in
-            if let outputSignal = r.output as? CNSSignal<String> {
-                results.append(outputSignal.payload!)
-            }
-        }
-        
-        cns.stimulate(input.createSignal("test"))
-        XCTAssertEqual(results.count, 2)
-        XCTAssertTrue(results.contains("safe: test"))
-        XCTAssertTrue(results.contains("direct: test"))
-    }
-    
-    func testAxonCreateCollaterals() {
-        let input = CNSCollateral<String>("input")
-        let axon = CNSAxon()
-        
-        // Create collaterals directly in the axon - no external references needed!
-        let d = CNSDendrite(inputCollateral: input) { (payload, axon, _) in
-            guard let stringPayload = payload else { return nil }
-            
-            // Create output collaterals directly in the axon
-            let stringOutput = axon.create("stringOutput", String.self)
-            let intOutput = axon.create("intOutput", Int.self)
-            
-            // Use the created collaterals
-            if stringPayload.count > 3 {
-                return stringOutput.createSignal("long: \(stringPayload)")
-            } else {
-                return intOutput.createSignal(stringPayload.count)
-            }
-        }
-        
-        let n = CNSNeuron(name: "AxonCreator", axon: axon, dendrites: [d])
-        let cns = CNS([n])
-        
-        var stringResult: String?
-        var intResult: Int?
-        _ = cns.addResponseListener { r in
-            if let outputSignal = r.output as? CNSSignal<String> {
-                stringResult = outputSignal.payload
-            } else if let outputSignal = r.output as? CNSSignal<Int> {
-                intResult = outputSignal.payload
-            }
-        }
-        
-        // Test with long string
-        cns.stimulate(input.createSignal("hello"))
-        XCTAssertEqual(stringResult, "long: hello")
-        XCTAssertNil(intResult)
-        
-        // Reset results
-        stringResult = nil
-        intResult = nil
-        
-        // Test with short string
-        cns.stimulate(input.createSignal("hi"))
-        XCTAssertNil(stringResult)
-        XCTAssertEqual(intResult, 2)
-    }
-    
-    func testAxonCreateCollateralsSimplified() {
-        let input = CNSCollateral<String>("input")
-        let axon = CNSAxon.make { def in
-            def.output(String.self)
-        }
-        
-        // Use dynamic members
-        let d = CNSDendrite(inputCollateral: input) { (payload, axon, _) in
-            guard let stringPayload = payload else { return nil }
-            return axon.output.createSignal("processed: \(stringPayload)")
-        }
-        
-        let n = CNSNeuron(name: "SimpleCreator", axon: axon, dendrites: [d])
-        let cns = CNS([n])
-        
-        var result: String?
-        _ = cns.addResponseListener { r in
-            if let outputSignal = r.output as? CNSSignal<String> {
-                result = outputSignal.payload
-            }
-        }
-        
-        cns.stimulate(input.createSignal("test"))
-        XCTAssertEqual(result, "processed: test")
-    }
-
     func testAsyncDendriteWithFuture() {
-        let input = CNSCollateral<Int>("in")
-        let axon = CNSAxon.make { def in def.out(String.self) }
-        let d = CNSDendrite(inputCollateral: input) { (p: Int?, axon, _) in
+        let input = CNSCollateral<Int>()
+        let out = CNSCollateral<String>()
+        let axon = CNSAxon(out)
+        let d = CNSDendrite(inputCollateral: input) { (p: Int?, _, _) in
             guard let v = p else { return nil }
             return CNSEventual.future { complete in
                 DispatchQueue.global().async {
-                    complete(axon.out.createSignal("v=\(v)"))
+                    complete(out.createSignal("v=\(v)"))
                 }
             }
         }
-        let cns = CNS([CNSNeuron(name: "N", axon: axon, dendrites: [d])])
+        let cns = CNS([CNSNeuron(axon: axon, dendrites: [d])])
         var outputs: [String] = []
         var qlens: [Int] = []
         _ = cns.addResponseListener { r in
-            if let s = r.output as? CNSSignal<String>, let payload = s.payload { outputs.append(payload) }
+            if let s = r.outputSignal as? CNSSignal<String>, let payload = s.payload { outputs.append(payload) }
             qlens.append(r.queueLength)
         }
-        cns.stimulate(input.createSignal(7))
+        _ = cns.stimulate(input.createSignal(7))
         XCTAssertEqual(outputs, ["v=7"])
         XCTAssertEqual(qlens.last, 0)
+    }
+
+    func testModalityDendriteSelectsAfferentPathHandler() {
+        let input = CNSCollateral<String>()
+        let out = CNSCollateral<String>()
+        let axon = CNSAxon(out)
+        let mode = modality(afferentPaths: [:])
+        let path = afferentPath()
+        let d = modalityDendrite(
+            collateral: input,
+            modality: mode,
+            afferentPaths: [
+                path: { payload, _, _ in
+                    "path:\(payload as? String ?? "")"
+                }
+            ],
+            default: { payload, _, _ in
+                "default:\(payload as? String ?? "")"
+            },
+            output: { result, axon, _ in
+                out.createSignal(result)
+            }
+        )
+        let cns = CNS([CNSNeuron(axon: axon, dendrites: [d])])
+        var result: String?
+        _ = cns.addResponseListener { r in
+            if let s = r.outputSignal as? CNSSignal<String> { result = s.payload }
+        }
+        _ = cns.stimulate(
+            input.createSignal("x"),
+            CNSStimulationOptions<String, String>(modality: mode, afferentPath: path)
+        )
+        XCTAssertEqual(result, "path:x")
+    }
+
+    func testContextStoreSetAllRestoresSnapshot() {
+        let store = CNSStimulationContextStore()
+        let key = NSObject()
+        store.set(key: key, value: "value")
+        let snapshot = store.getAll()
+        store.delete(key: key)
+        XCTAssertNil(store.get(key: key))
+        store.setAll(snapshot)
+        XCTAssertEqual(store.get(key: key) as? String, "value")
+    }
+
+    func testStimulationTracksFailedMaxHopTasks() {
+        let input = CNSCollateral<Int>()
+        let axon = CNSAxon()
+        let d = CNSDendrite(inputCollateral: input) { (payload: Int?, _, _) in
+            input.createSignal(payload ?? 0)
+        }
+        let cns = CNS([CNSNeuron(axon: axon, dendrites: [d])])
+        let stimulation = cns.stimulate(
+            input.createSignal(1),
+            CNSStimulationOptions<Int, Int>(maxNeuronHops: 1)
+        )
+        XCTAssertEqual(stimulation.getFailedTasks().count, 1)
+        XCTAssertTrue(stimulation.getAllActivationTasks().isEmpty)
+    }
+
+    func testDrainGuardCompletes() async {
+        let input = CNSCollateral<Int>()
+        let out = CNSCollateral<Int>()
+        let axon = CNSAxon(out)
+        let d = CNSDendrite(inputCollateral: input) { (payload: Int?, _, _) in
+            out.createSignal(payload ?? 0)
+        }
+        let cns = CNS([CNSNeuron(axon: axon, dendrites: [d])])
+        let guarder = CNSDrainGuard<Int, Int>(cns: cns, signal: input.createSignal(3))
+        await guarder.drain()
+        XCTAssertFalse(guarder.isDraining())
+        XCTAssertNil(guarder.getCurrentStimulation())
     }
 }
 

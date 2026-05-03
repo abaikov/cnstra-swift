@@ -1,356 +1,487 @@
 # CNStra - Swift SDK
 
-Graph-routed, type-safe orchestration for reactive Swift apps — no global event bus.
+Graph-routed, type-safe orchestration for Swift apps. No global event bus, no string routing.
 
-This is a Swift implementation of the original [CNStra TypeScript library](https://www.npmjs.com/package/@cnstra/core) ([GitHub](https://github.com/abaikov/cnstra)).
+This package is a Swift port of the core ideas from the original [CNStra TypeScript library](https://www.npmjs.com/package/@cnstra/core) ([GitHub](https://github.com/abaikov/cnstra)).
 
-## 🧠 What is CNStra?
+## What Is CNStra?
 
-CNStra models your app as a typed neuron graph.
-You explicitly start a run with `cns.stimulate(...)`; CNStra then performs a deterministic, hop-bounded traversal from collateral → dendrite → returned signal, step by step.
+CNStra models a workflow as a graph of neurons.
 
-- Zero dependencies: suitable for iOS, macOS, tvOS, watchOS, server-side Swift.
-- Not pub/sub: there are no ambient listeners or global emit. Only the signal you return from a dendrite continues the traversal; returning `nil` ends that branch.
+A run starts with `cns.stimulate(...)`. CNStra looks at the signal's collateral object, finds dendrites subscribed to that exact collateral instance, runs their response closures, and routes any returned signals to the next matching dendrites.
 
-## 💡 Why CNStra
+- Routing is by **collateral object identity**, not by string names.
+- A dendrite continues the graph only by returning a `CNSSignal`.
+- Returning `nil` ends that branch.
+- Multiple outputs are supported by returning an array of signals.
+- Per-neuron and per-run concurrency gates are available.
 
-We follow ERG (Event → Reaction → Graph), not a raw Flux/event-bus.
+## Core Model
 
-- Deterministic routing: signals are delivered along an explicit neuron graph, not broadcast to whoever “happens to listen”.
-- Readable, reliable flows: each step is local and typed; branches are explicit; debugging is straightforward.
-- Backpressure & concurrency: built‑in per‑neuron concurrency limits keep workloads controlled.
-- Saga‑grade orchestration: ERG models long‑running, multi‑step reactions with cancel hooks, so you rarely need to hand‑roll “sagas”.
-- Safer than ad‑hoc events: no hidden global listeners; every continuation must be returned explicitly.
+### Collateral
 
-## 🏗️ Core Model
+A `CNSCollateral<Payload>` is a typed channel object. It has no name or string type.
 
-### Neurons
-Units of logic with clear DI and boundaries:
+```swift
+let userCreated = CNSCollateral<(id: String, name: String)>()
+let userRegistered = CNSCollateral<(userId: String, status: String)>()
 
-- Name — unique `name`
-- Axon — the neuron's output channels (its collaterals)
-- Dendrites — input receptors (typed reactions bound to specific collaterals)
+let signal = userCreated.createSignal((id: "123", name: "Ada"))
+```
 
-### Collaterals
-Typed output channels that mint signals:
+### Signal
 
-- Type — string identifier (e.g., "user:created")
-- Payload — the data carried by the signal
-- `createSignal(payload)` → `CNSSignal<Payload>`
+A `CNSSignal<Payload>` carries:
 
-- Strongly-typed collateral type key: `CNSCollateralType<Payload>` is a phantom type used for safer registration/lookup. You can derive it from a collateral via `.typeKey`.
+- `collateral`: the exact collateral object that created the signal
+- `payload`: optional typed payload
 
-### Signals
-The data structures that flow through the system:
+```swift
+let s = userRegistered.createSignal((userId: "123", status: "completed"))
+print(s.collateral === userRegistered) // true
+```
 
-- `collateralType` — string type of the collateral that created this signal
-- `payload` — the typed data being transmitted
+### Axon
 
-## 🚀 Quick Start
+A `CNSAxon` declares which collateral instances a neuron may emit. The graph builder uses this to calculate reachability and SCC cleanup.
 
-Add CNStra as a SwiftPM dependency and import the module where needed.
+```swift
+let output = CNSCollateral<String>()
+let axon = CNSAxon(output)
+
+// You can add more later if needed.
+let error = CNSCollateral<Error>()
+axon.register(error)
+```
+
+There is intentionally no dynamic member lookup and no string lookup.
+
+### Dendrite
+
+A `CNSDendrite` subscribes to one input collateral and returns zero, one, or many output signals.
+
+```swift
+let input = CNSCollateral<Int>()
+let output = CNSCollateral<String>()
+
+let dendrite = CNSDendrite(inputCollateral: input) { (value: Int?, _, ctx) in
+    guard let value else { return nil }
+
+    let previous = (ctx.get() as? Int) ?? 0
+    ctx.set(previous + value)
+
+    return output.createSignal("sum=\(previous + value)")
+}
+```
+
+### Neuron
+
+A `CNSNeuron` has no runtime name. Persist/debug labels live outside the core model.
+
+```swift
+let neuron = CNSNeuron(
+    axon: CNSAxon(output),
+    dendrites: [dendrite],
+    concurrency: 2
+)
+```
+
+## Quick Start
 
 ```swift
 import CNStra
 
-// Define collaterals (communication channels)
-let userCreated = CNSCollateral<(id: String, name: String)>("user:created")
-let userRegistered = CNSCollateral<(userId: String, status: String)>("user:registered")
+let userCreated = CNSCollateral<(id: String, name: String)>()
+let userRegistered = CNSCollateral<(userId: String, status: String)>()
 
-// Create axon via DSL
-let axon = CNSAxon.make { def in
-    def.userRegistered((userId: String, status: String).self)
-}
-
-// Create a neuron
 let userService = CNSNeuron(
-    name: "user-service",
-    axon: axon,
+    axon: CNSAxon(userRegistered),
     dendrites: [
-        CNSDendrite(inputCollateral: userCreated) { payload, axon, _ in
-            guard let p = payload else { return nil }
-            return axon.userRegistered.createSignal((userId: p.id, status: "completed"))
+        CNSDendrite(inputCollateral: userCreated) { payload, _, _ in
+            guard let payload else { return nil }
+            return userRegistered.createSignal((
+                userId: payload.id,
+                status: "completed"
+            ))
         }
     ]
 )
 
-// Create the CNS system
 let cns = CNS([userService])
 
-// Stimulate the system
-cns.stimulate(userCreated.createSignal((id: "123", name: "John Doe")))
+_ = cns.stimulate(userCreated.createSignal((id: "123", name: "Ada")))
 ```
 
-## 📚 API Reference
-
-### Collateral
+## CNS And Responses
 
 ```swift
-let userEvent = CNSCollateral<(userId: String)>("user:event")
-let simpleEvent = CNSCollateral<Void>("simple:event")
+let unsubscribe = cns.addResponseListener { response in
+    if let output = response.outputSignal {
+        print("output:", output)
+    }
 
-// Phantom typed type key
-struct MyError: Error {}
-let errorType = CNSCollateralType<MyError>("error")
-
-let errorCollateral = CNSCollateral<MyError>("error")
-let derivedTypeKey: CNSCollateralType<MyError> = errorCollateral.typeKey
-```
-
-### Axon DSL and access
-
-```swift
-let axon = CNSAxon.make { def in
-    def.output(String.self)
-    def.count(Int.self)
+    if response.queueLength == 0 {
+        print("done")
+    }
 }
-
-// Dynamic member access
-// Force (throws fatalError if not registered):
-let forced: CNSCollateral<String> = axon.output
-// Safe (optional):
-let safe: CNSCollateral<String>? = axon.safe.output
-
-// Register/get by type key
-axon.register(errorType)
-let errorChOpt: CNSCollateral<MyError>? = axon.get(errorType)
-let errorCh: CNSCollateral<MyError> = axon.getForce(errorType)
 ```
 
-### Neuron and Dendrite
+`CNSResponse<TIn, TOut>` and `CNS.CNSAnyResponse` expose:
+
+- `inputSignal`
+- `outputSignal`
+- `error`
+- `queueLength`
+- `modality`
+- `afferentPath`
+- `contextValue`
+- `hops`
+- `stimulation`
+
+## Stimulation Options
 
 ```swift
-let input = CNSCollateral<Int>("input")
-let axon = CNSAxon.make { def in def.output(String.self) }
+let abort = CNSCancellationToken()
+
+let opts = CNSStimulationOptions<Int, String>(
+    onResponse: { r in
+        if let error = r.error {
+            print("error:", error)
+        }
+    },
+    abortSignal: abort,
+    maxNeuronHops: 10,
+    concurrency: 4,
+    continuationScheduler: CNSAsyncScheduler()
+)
+
+_ = cns.stimulate(input.createSignal(5), opts)
+```
+
+Options:
+
+- `onResponse`: local response listener for the run
+- `abortSignal`: cancellation signal
+- `maxNeuronHops`: maximum visits per neuron during a run
+- `concurrency`: per-run concurrency gate
+- `ctx`: custom `CNSStimulationContextStoreProtocol`
+- `modality`: selected modality object
+- `afferentPath`: selected afferent path object
+- `stimulationContext`: arbitrary user context
+- `continuationScheduler`: where `CNSEventual.future` completions resume
+
+Global options:
+
+```swift
+let cns = CNS(
+    [neuron],
+    options: CNSOptions(autoCleanupContexts: true)
+)
+```
+
+## Signal Flow Patterns
+
+### Chain
+
+```swift
+let input = CNSCollateral<(value: Int)>()
+let middle = CNSCollateral<(doubled: Int)>()
+let output = CNSCollateral<(result: String)>()
+
+let step1 = CNSNeuron(
+    axon: CNSAxon(middle),
+    dendrites: [
+        CNSDendrite(inputCollateral: input) { payload, _, _ in
+            guard let payload else { return nil }
+            return middle.createSignal((doubled: payload.value * 2))
+        }
+    ]
+)
+
+let step2 = CNSNeuron(
+    axon: CNSAxon(output),
+    dendrites: [
+        CNSDendrite(inputCollateral: middle) { payload, _, _ in
+            guard let payload else { return nil }
+            return output.createSignal((result: "Final: \(payload.doubled)"))
+        }
+    ]
+)
+
+let cns = CNS([step1, step2])
+_ = cns.stimulate(input.createSignal((value: 5)))
+```
+
+### Fan-Out
+
+```swift
+let trigger = CNSCollateral<String>()
+let branch1 = CNSCollateral<String>()
+let branch2 = CNSCollateral<String>()
+
+let proc1 = CNSNeuron(
+    axon: CNSAxon(branch1),
+    dendrites: [
+        CNSDendrite(inputCollateral: trigger) { payload, _, _ in
+            guard let payload else { return nil }
+            return branch1.createSignal("A-\(payload)")
+        }
+    ]
+)
+
+let proc2 = CNSNeuron(
+    axon: CNSAxon(branch2),
+    dendrites: [
+        CNSDendrite(inputCollateral: trigger) { payload, _, _ in
+            guard let payload else { return nil }
+            return branch2.createSignal("B-\(payload)")
+        }
+    ]
+)
+
+let cns = CNS([proc1, proc2])
+_ = cns.stimulate(trigger.createSignal("test"))
+```
+
+### Multiple Outputs From One Dendrite
+
+```swift
+let trigger = CNSCollateral<String>()
+let log = CNSCollateral<String>()
+let metric = CNSCollateral<Int>()
 
 let neuron = CNSNeuron(
-    name: "worker",
-    axon: axon,
+    axon: CNSAxon(log, metric),
     dendrites: [
-        CNSDendrite(inputCollateral: input) { payload, axon, ctx in
-            guard let v = payload else { return nil }
-            // Context example
-            let prev = (ctx.get() as? Int) ?? 0
-            ctx.set(prev + v)
-            return axon.output.createSignal("sum=\(prev + v)")
+        CNSDendrite(inputCollateral: trigger) { payload, _, _ in
+            guard let payload else { return nil }
+            return [
+                log.createSignal("received \(payload)"),
+                metric.createSignal(payload.count)
+            ]
         }
     ]
 )
 ```
 
-### CNS
+## Context And Cancellation
+
+Each neuron gets a local context slot for the current stimulation.
 
 ```swift
-// Global listener
-_ = cns.addResponseListener { r in
-    // r.input, r.output, r.error, r.queueLength
-}
+let increment = CNSCollateral<Int>()
+let count = CNSCollateral<Int>()
+let abort = CNSCancellationToken()
 
-// Options
-// - autoCleanupContexts: enable SCC-based context cleanup
-// - scheduler: CNSSyncScheduler (default) or CNSAsyncScheduler for background execution
-let cns = CNS([neuron], options: CNSOptions(autoCleanupContexts: true, scheduler: CNSSyncScheduler()))
-```
+let counter = CNSNeuron(
+    axon: CNSAxon(count),
+    dendrites: [
+        CNSDendrite(inputCollateral: increment) { payload, _, ctx in
+            guard ctx.abortSignal?.isAborted != true else { return nil }
 
-### stimulate
+            let current = (ctx.get() as? Int) ?? 0
+            let next = current + (payload ?? 0)
+            ctx.set(next)
 
-```swift
-// Simple
-cns.stimulate(input.createSignal(5))
-
-// With local onResponse and cancel token
-let token = CNSCancellationToken()
-let opts = CNSStimulationOptions<Int, String>(
-    onResponse: { r in
-        if let err = r.error { print("error: \(err)") }
-        if let out = r.output { print("signal: \(out.collateralType)") }
-        if r.queueLength == 0 { print("done") }
-    },
-    cancelToken: token
+            return count.createSignal(next)
+        }
+    ]
 )
-cns.stimulate(input.createSignal(5), opts)
-```
-
-## ⚙️ Stimulation Options (Swift)
-
-- `onResponse: (CNSResponse<TIn, TOut>) -> Void` — unified callback with `input`, `output`, `error`, `queueLength`.
-- `cancelToken: CNSCancellationToken?` — graceful stop for the current stimulation.
-- `maxHops: Int?` — limit total hop count in the run.
-- `runConcurrency: Int?` — run-level concurrency gate.
-- `CNSOptions(autoCleanupContexts: Bool, scheduler: CNSScheduler?)` — SCC cleanup and execution policy.
-
-### Scheduling (Sync vs Async)
-
-What it is
-- Chooses where CNSEventual.future completions run before they’re queued back into the same run.
-- Sync: handle on current thread. Async: handle on background queue.
-
-What it’s not
-- No new processes/runs. No implicit UI hops (do `DispatchQueue.main.async` yourself).
-- Gates still apply: per‑neuron `concurrency`, `runConcurrency`.
-
-When to pick
-- Sync (default): UI/model‑centric flows; predictable in‑thread handling.
-- Async: many IO‑heavy futures; keep completion handling off the current thread.
-
-How to set
-```swift
-// Global
-let cns = CNS(neurons, options: CNSOptions(scheduler: CNSSyncScheduler()))
-let cnsAsync = CNS(neurons, options: CNSOptions(scheduler: CNSAsyncScheduler()))
-
-// Per run override
-let opts = CNSStimulationOptions<Input, Output>(scheduler: CNSAsyncScheduler(), runConcurrency: 4)
-cns.stimulate(input.createSignal(...), opts)
-```
-
-Typical pattern (heavy off-main, UI on main)
-```swift
-let d = CNSDendrite(inputCollateral: input) { (v: Int?, ax, _) in
-  guard let v else { return nil }
-  return CNSEventual.future { complete in
-    Task.detached {
-      let text = try? await api.fetchText(id: v)
-      DispatchQueue.main.async { complete(ax.done.createSignal(text ?? "")) }
-    }
-  }
-}
-```
-
-## 🔄 Signal Flow Patterns
-
-### Basic Chain
-
-```swift
-let input = CNSCollateral<(value: Int)>("input")
-let middle = CNSCollateral<(doubled: Int)>("middle")
-let output = CNSCollateral<(result: String)>("output")
-
-let ax1 = CNSAxon.make { def in def.middle((doubled: Int).self) }
-let ax2 = CNSAxon.make { def in def.output((result: String).self) }
-
-let step1 = CNSNeuron(name: "step1", axon: ax1, dendrites: [
-    CNSDendrite(inputCollateral: input) { p, axon, _ in
-        guard let v = p else { return nil }
-        return axon.middle.createSignal((doubled: v.value * 2))
-    }
-])
-
-let step2 = CNSNeuron(name: "step2", axon: ax2, dendrites: [
-    CNSDendrite(inputCollateral: middle) { p, axon, _ in
-        guard let v = p else { return nil }
-        return axon.output.createSignal((result: "Final: \(v.doubled)"))
-    }
-])
-
-let cns = CNS([step1, step2])
-cns.stimulate(input.createSignal((value: 5)))
-```
-
-### Fan‑out
-
-```swift
-let trigger = CNSCollateral<(data: String)>("trigger")
-let branch1 = CNSCollateral<(result: String)>("branch1")
-let branch2 = CNSCollateral<(result: String)>("branch2")
-
-let ax1 = CNSAxon.make { def in def.branch1((result: String).self) }
-let ax2 = CNSAxon.make { def in def.branch2((result: String).self) }
-
-let proc1 = CNSNeuron(name: "proc1", axon: ax1, dendrites: [
-    CNSDendrite(inputCollateral: trigger) { p, axon, _ in
-        guard let v = p else { return nil }
-        return axon.branch1.createSignal((result: "A-\(v.data)"))
-    }
-])
-
-let proc2 = CNSNeuron(name: "proc2", axon: ax2, dendrites: [
-    CNSDendrite(inputCollateral: trigger) { p, axon, _ in
-        guard let v = p else { return nil }
-        return axon.branch2.createSignal((result: "B-\(v.data)"))
-    }
-])
-
-let cns = CNS([proc1, proc2])
-cns.stimulate(trigger.createSignal((data: "test")))
-
-// If you need background execution for heavy/IO work:
-// let cns = CNS([proc1, proc2], options: CNSOptions(scheduler: CNSAsyncScheduler()))
-```
-
-### Context‑Aware with Abort
-
-```swift
-let input = CNSCollateral<(increment: Int)>("input")
-let output = CNSCollateral<(count: Int)>("output")
-let ax = CNSAxon.make { def in def.output((count: Int).self) }
-
-let counter = CNSNeuron(name: "counter", axon: ax, dendrites: [
-    CNSDendrite(inputCollateral: input) { payload, axon, ctx in
-        if ctx.abortToken?.isCancelled == true { return nil }
-        let current = (ctx.get() as? Int) ?? 0
-        let newTotal = current + (payload?.increment ?? 0)
-        ctx.set(newTotal)
-        return axon.output.createSignal((count: newTotal))
-    }
-])
 
 let cns = CNS([counter])
-cns.stimulate(input.createSignal((increment: 5)))
+_ = cns.stimulate(
+    increment.createSignal(5),
+    CNSStimulationOptions<Int, Int>(abortSignal: abort)
+)
 ```
 
-## 🧠 Topology & Performance
+For external context snapshots, use `CNSStimulationContextStore`:
 
-- Subscriber/owner indexes: `getSubscribers`, `getParentNeuronByCollateralType`.
-- Strongly Connected Components (SCC): Tarjan SCC, SCC DAG, ancestor precompute.
-- `getSCCSetByNeuronName`, `getSccIndexByNeuronName`, `canNeuronBeGuaranteedDone`.
-- Auto context cleanup (optional) based on SCC.
+```swift
+let store = CNSStimulationContextStore()
+let key = NSObject()
+
+store.set(key: key, value: "cached")
+let snapshot = store.getAll()
+store.setAll(snapshot)
+```
+
+## Async Work
+
+Dendrite closures are synchronous, but they can return `CNSEventual.future` to complete later.
+
+```swift
+let input = CNSCollateral<Int>()
+let output = CNSCollateral<String>()
+
+let worker = CNSNeuron(
+    axon: CNSAxon(output),
+    dendrites: [
+        CNSDendrite(inputCollateral: input) { value, _, _ in
+            guard let value else { return nil }
+
+            return CNSEventual.future { complete in
+                Task.detached {
+                    let text = "value=\(value)"
+                    complete(output.createSignal(text))
+                }
+            }
+        }
+    ]
+)
+```
+
+`continuationScheduler` controls where future completions are handled:
+
+```swift
+let opts = CNSStimulationOptions<Int, String>(
+    continuationScheduler: CNSAsyncScheduler()
+)
+```
+
+## Modality And Afferent Path
+
+`modalityDendrite` mirrors the TypeScript factory helper: handler selection is by object identity.
+
+```swift
+let input = CNSCollateral<String>()
+let output = CNSCollateral<String>()
+
+let mobile = modality(afferentPaths: [:])
+let pushPath = afferentPath()
+
+let d = modalityDendrite(
+    collateral: input,
+    modality: mobile,
+    afferentPaths: [
+        pushPath: { payload, _, _ in
+            "push:\(payload as? String ?? "")"
+        }
+    ],
+    default: { payload, _, _ in
+        "default:\(payload as? String ?? "")"
+    },
+    output: { result, _, _ in
+        output.createSignal(result)
+    }
+)
+
+let n = CNSNeuron(axon: CNSAxon(output), dendrites: [d])
+let cns = CNS([n])
+
+_ = cns.stimulate(
+    input.createSignal("hello"),
+    CNSStimulationOptions<String, String>(
+        modality: mobile,
+        afferentPath: pushPath
+    )
+)
+```
+
+## Factory Helpers
+
+```swift
+let input: CNSCollateral<Int> = collateral()
+let output: CNSCollateral<String> = collateral()
+
+let builder = neuron(axon: CNSAxon(output))
+    .setConcurrency(2)
+    .dendrite(collateral: input) { payload, _, _ in
+        guard let payload = payload as? Int else { return nil }
+        return output.createSignal("value=\(payload)")
+    }
+
+let n = builder.build()
+```
+
+## Drain Guard
+
+`CNSDrainGuard` starts a stimulation and tracks its drain state. If no `abortSignal` is provided, it owns a `CNSCancellationToken`.
+
+```swift
+let guarder = CNSDrainGuard<Int, String>(
+    cns: cns,
+    signal: input.createSignal(1)
+)
+
+await guarder.drain()
+print(guarder.isDraining()) // false
+```
+
+## Persistence Registry
+
+Runtime neurons and collaterals remain identity-only. Persist names are external labels.
+
+```swift
+let registry = CNSPersistOptionsRegistry()
+registry.addNeuron(neuron, options: CNSNeuronPersistOptions(name: "worker", neuron: neuron))
+registry.addCollateral(output, options: CNSCollateralPersistOptions(name: "output", collateral: output))
+```
+
+## Topology And Performance
+
+`CNSNetwork` builds indexes once at initialization:
+
+- subscribers by collateral identity
+- parent neuron by collateral identity
+- strongly connected components
+- SCC DAG ancestry for safe context cleanup
+
+```swift
+let subscribers = cns.network.getSubscribers(collateral: input)
+let parent = cns.network.getParentNeuron(forCollateral: output)
+```
 
 Performance notes:
 
-- Sync‑first core. `CNSEventual.future` is non‑blocking; results are posted back into the same run deterministically.
-- Per‑neuron concurrency gates to prevent resource exhaustion.
-- SCC building has overhead; enable `autoCleanupContexts` only when memory pressure warrants it.
+- Routing is identity-based and deterministic.
+- `CNSEventual.future` is non-blocking and posts back into the same run.
+- `concurrency` on `CNSNeuron` gates work for that neuron across runs.
+- `CNSStimulationOptions.concurrency` gates work inside a single run.
+- `autoCleanupContexts` can reduce retained context values in larger cyclic graphs.
 
-When to pick a scheduler:
-- Use `CNSSyncScheduler` (default) for UI/model updates on main and small flows.
-- Use `CNSAsyncScheduler` for fan‑out network/IO heavy steps; combine with per‑neuron `concurrency` and `runConcurrency`.
+## Error Handling
 
-## 🚨 Error Handling
-
-Errors are delivered via `onResponse.error`. Alternatively, use throwing dendrites with typed error collaterals.
+Throwing dendrites can route errors to a typed error collateral.
 
 ```swift
-let opts = CNSStimulationOptions<Int, String>(onResponse: { r in
-    if let err = r.error { print("Error: \(err)") }
-})
+enum WorkerError: Error {
+    case failed
+}
 
-// Typed error routing via collateral type key
-struct MyError: Error {}
-let input = CNSCollateral<Int>("in")
-let errorType = CNSCollateralType<MyError>("error")
-let errorOut = CNSCollateral<MyError>("error")
-let axon = CNSAxon()
-axon.register(errorOut)
+let input = CNSCollateral<Int>()
+let error = CNSCollateral<WorkerError>()
 
 let d = CNSDendrite(
-  inputCollateral: input,
-  errorCollateralType: errorType
-) { (value: Int, axon, _) in
-  throw MyError()
+    inputCollateral: input,
+    errorCollateral: error
+) { (value: Int, _, _) in
+    throw WorkerError.failed
 }
 ```
 
-## 🔧 Advanced Configuration
+You can also inspect task failures after a run:
 
 ```swift
-// Auto cleanup contexts (SCC-based) + Async scheduler
-let cns = CNS(neurons, options: CNSOptions(autoCleanupContexts: true, scheduler: CNSAsyncScheduler()))
+let stimulation = cns.stimulate(
+    input.createSignal(1),
+    CNSStimulationOptions<Int, Int>(maxNeuronHops: 1)
+)
 
-// Per-neuron concurrency
-let n = CNSNeuron(name: "worker", axon: ax, dendrites: ds, concurrency: 2)
+let failed = stimulation.getFailedTasks()
+```
+
+## SwiftPM Versioning
+
+SwiftPM package versions are git tags. `Package.swift` does not contain the library version.
+
+After a release commit, create and push a semver tag, for example:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 ---
 
-CNStra provides deterministic, type‑safe orchestration without the complexity of traditional event systems. Build reliable, maintainable reactive applications with clear data flow and predictable behavior.
+CNStra provides deterministic, typed orchestration without string-routed event buses.

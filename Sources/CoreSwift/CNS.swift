@@ -1,136 +1,81 @@
 import Foundation
 
+// MARK: - Signals
+
 public struct CNSSignal<Payload> {
-    public let collateralType: String
+    public let collateral: CNSCollateral<Payload>
     public let payload: Payload?
+
+    public init(collateral: CNSCollateral<Payload>, payload: Payload? = nil) {
+        self.collateral = collateral
+        self.payload = payload
+    }
 }
 
 protocol CNSAnySignalProtocol {
-    var collateralType: String { get }
+    var collateralObject: AnyObject { get }
     var payloadAny: Any? { get }
 }
 
 extension CNSSignal: CNSAnySignalProtocol {
-    var payloadAny: Any? { return payload }
+    var collateralObject: AnyObject { collateral }
+    var payloadAny: Any? { payload }
 }
 
-public final class CNSCollateral<Payload> {
-    public let type: String
-    public init(_ type: String) { self.type = type }
-    public func createSignal(_ payload: Payload? = nil) -> CNSSignal<Payload> {
-        return CNSSignal(collateralType: type, payload: payload)
-    }
+// MARK: - Collateral
+
+public protocol ICNSCollateral {
+    associatedtype Payload
+    func createSignal(_ payload: Payload?) -> CNSSignal<Payload>
 }
 
-// Strongly-typed collateral type (phantom typed)
-public struct CNSCollateralType<Payload> {
-    public let rawValue: String
-    public init(_ rawValue: String) { self.rawValue = rawValue }
-}
-
-public extension CNSCollateral {
-    var typeKey: CNSCollateralType<Payload> { CNSCollateralType<Payload>(self.type) }
-}
-
-@dynamicMemberLookup
-public final class CNSAxon {
-    public private(set) var byType: [String: Any] = [:]
+public final class CNSCollateral<Payload>: ICNSCollateral {
     public init() {}
-    public func register<T>(_ collateral: CNSCollateral<T>) { byType[collateral.type] = collateral }
-    public func contains(_ t: String) -> Bool { byType.keys.contains(t) }
-    
-    // Convenience methods for getting typed collaterals
-    public func get<T>(_ type: String) -> CNSCollateral<T>? {
-        return byType[type] as? CNSCollateral<T>
-    }
-    
-    public func get<T>(_ collateral: CNSCollateral<T>) -> CNSCollateral<T>? {
-        return byType[collateral.type] as? CNSCollateral<T>
-    }
-    
-    // String-based typed accessors (no external references required)
-    public func register<T>(_ type: String, _ payloadType: T.Type) {
-        let c = CNSCollateral<T>(type)
-        register(c)
-    }
-    
-    public func get<T>(_ type: String, _ payloadType: T.Type) -> CNSCollateral<T>? { byType[type] as? CNSCollateral<T> }
-    public func get<T>(_ type: CNSCollateralType<T>) -> CNSCollateral<T>? { byType[type.rawValue] as? CNSCollateral<T> }
-    
-    public func getForce<T>(_ type: String, _ payloadType: T.Type) -> CNSCollateral<T> {
-        if let c = byType[type] as? CNSCollateral<T> { return c }
-        preconditionFailure("[CNSAxon] Missing collateral '\(type)' of type \(T.self)")
-    }
-    public func getForce<T>(_ type: CNSCollateralType<T>) -> CNSCollateral<T> {
-        if let c = byType[type.rawValue] as? CNSCollateral<T> { return c }
-        preconditionFailure("[CNSAxon] Missing collateral '\(type.rawValue)' of type \(T.self)")
-    }
-    
-    // Force unwrap version for when you're sure the collateral exists
-    public func getForce<T>(_ collateral: CNSCollateral<T>) -> CNSCollateral<T> {
-        return byType[collateral.type] as! CNSCollateral<T>
-    }
-    
-    // Create and register a new collateral directly in the axon
-    public func create<T>(_ type: String) -> CNSCollateral<T> {
-        let collateral = CNSCollateral<T>(type)
-        register(collateral)
-        return collateral
-    }
-    
-    // Create and register a new collateral with a specific type
-    public func create<T>(_ type: String, _ payloadType: T.Type) -> CNSCollateral<T> {
-        let collateral = CNSCollateral<T>(type)
-        register(collateral)
-        return collateral
-    }
-    public func register<T>(_ type: CNSCollateralType<T>) { byType[type.rawValue] = CNSCollateral<T>(type.rawValue) }
-
-    // Dynamic member access: axon.output -> CNSCollateral<T>
-    public subscript<T>(dynamicMember member: String) -> CNSCollateral<T> {
-        if let c: CNSCollateral<T> = get(member, T.self) { return c }
-        preconditionFailure("[CNSAxon] Missing collateral '\(member)' of type \(T.self)")
-    }
-
-    // Safe dynamic member namespace: axon.safe.output -> CNSCollateral<T>?
-    public var safe: CNSAxonSafe { CNSAxonSafe(axon: self) }
-}
-
-@dynamicMemberLookup
-public struct CNSAxonSafe {
-    let axon: CNSAxon
-    public subscript<T>(dynamicMember member: String) -> CNSCollateral<T>? {
-        axon.get(member, T.self)
+    public func createSignal(_ payload: Payload? = nil) -> CNSSignal<Payload> {
+        CNSSignal(collateral: self, payload: payload)
     }
 }
 
-// MARK: Axon builder DSL
+// MARK: - Axon
 
-@dynamicMemberLookup
-public struct CNSAxonDefiner {
-    let axon: CNSAxon
-    // Usage: def.output(String.self) or def.intOutput(Int.self)
-    public subscript<T>(dynamicMember key: String) -> (_ type: T.Type) -> Void {
-        { t in axon.register(key, t) }
+public final class CNSAxon {
+    private var collateralObjects: [AnyObject]
+
+    public init(_ collaterals: AnyObject...) {
+        self.collateralObjects = collaterals
     }
-    // Explicit generic add
-    public func add<T>(_ key: String, _ type: T.Type) { axon.register(key, type) }
+
+    public init(collaterals: [AnyObject]) {
+        self.collateralObjects = collaterals
+    }
+
+    public func register<T>(_ collateral: CNSCollateral<T>) {
+        guard !collateralObjects.contains(where: { $0 === collateral }) else { return }
+        collateralObjects.append(collateral)
+    }
+
+    public func contains(_ collateral: AnyObject) -> Bool {
+        collateralObjects.contains { $0 === collateral }
+    }
+
+    func collateralInstances() -> [AnyObject] {
+        collateralObjects
+    }
 }
 
-public extension CNSAxon {
-    static func make(_ define: (CNSAxonDefiner) -> Void) -> CNSAxon {
-        let axon = CNSAxon()
-        define(CNSAxonDefiner(axon: axon))
-        return axon
-    }
+// MARK: - Abort / cancellation
+
+public protocol CNSAbortSignal: AnyObject {
+    var isAborted: Bool { get }
 }
 
-public final class CNSCancellationToken {
+public final class CNSCancellationToken: CNSAbortSignal {
     private var cancelled: Bool = false
     public init() {}
     public func cancel() { cancelled = true }
     public var isCancelled: Bool { cancelled }
-    // Bridge from Swift concurrency Task
+    public var isAborted: Bool { cancelled }
+
     public static func fromTask() -> CNSCancellationToken {
         let t = CNSCancellationToken()
         if Task.isCancelled { t.cancel() }
@@ -138,7 +83,8 @@ public final class CNSCancellationToken {
     }
 }
 
-// MARK: Scheduling
+// MARK: - Scheduling (optional; global stimulation scheduler was removed from TS `TCNSOptions`)
+
 public protocol CNSScheduler {
     func perform(_ work: @escaping () -> Void)
 }
@@ -156,43 +102,76 @@ public final class CNSAsyncScheduler: CNSScheduler {
     public func perform(_ work: @escaping () -> Void) { queue.async(execute: work) }
 }
 
-// MARK: Creator-style API for collaterals
+// MARK: - Stimulation context store (TS `ICNSStimulationContextStore`; class instances as keys)
 
-public protocol CNSCollateralCreator {
-    associatedtype Payload
-    associatedtype Output
-    var key: String { get }
-    func make(_ payload: Payload) -> Output
+public protocol CNSStimulationContextStoreProtocol: AnyObject {
+    func get(key: AnyObject) -> Any?
+    func set(key: AnyObject, value: Any?)
+    func delete(key: AnyObject)
+    /// Snapshot of context entries (Swift uses `ObjectIdentifier` instead of JS `Map<object, …>` keys).
+    func getAll() -> [ObjectIdentifier: Any]
+    func setAll(_ snapshot: [ObjectIdentifier: Any])
 }
 
-public extension CNSAxon {
-    // Safe emit (optional) – returns nil if collateral is not registered
-    func tryEmit<C: CNSCollateralCreator>(_ creator: C, _ payload: C.Payload) -> CNSSignal<C.Output>? {
-        guard let collateral: CNSCollateral<C.Output> = get(creator.key, C.Output.self) else { return nil }
-        return collateral.createSignal(creator.make(payload))
+public final class CNSStimulationContextStore: CNSStimulationContextStoreProtocol {
+    private var storage: [ObjectIdentifier: Any] = [:]
+
+    public init() {}
+
+    public func get(key: AnyObject) -> Any? {
+        storage[ObjectIdentifier(key)]
     }
-    // Force emit – crashes if collateral with key is missing (use in controlled environments/tests)
-    func emit<C: CNSCollateralCreator>(_ creator: C, _ payload: C.Payload) -> CNSSignal<C.Output> {
-        let collateral: CNSCollateral<C.Output> = getForce(creator.key, C.Output.self)
-        return collateral.createSignal(creator.make(payload))
+
+    public func set(key: AnyObject, value: Any?) {
+        if let value {
+            storage[ObjectIdentifier(key)] = value
+        } else {
+            storage.removeValue(forKey: ObjectIdentifier(key))
+        }
+    }
+
+    public func delete(key: AnyObject) {
+        storage.removeValue(forKey: ObjectIdentifier(key))
+    }
+
+    public func getAll() -> [ObjectIdentifier: Any] {
+        storage
+    }
+
+    public func setAll(_ snapshot: [ObjectIdentifier: Any]) {
+        storage = snapshot
     }
 }
+
+// MARK: - Local dendrite context
 
 public final class CNSLocalCtx {
     public let get: () -> Any?
     public let set: (Any?) -> Void
-    public let abortToken: CNSCancellationToken?
+    public let delete: () -> Void
+    public let abortSignal: CNSAbortSignal?
     public weak var cns: CNS?
-    public init(get: @escaping () -> Any?, set: @escaping (Any?) -> Void, abortToken: CNSCancellationToken?, cns: CNS) {
+    public weak var stimulation: CNSStimulation?
+
+    public init(
+        get: @escaping () -> Any?,
+        set: @escaping (Any?) -> Void,
+        delete: @escaping () -> Void,
+        abortSignal: CNSAbortSignal?,
+        cns: CNS,
+        stimulation: CNSStimulation?
+    ) {
         self.get = get
         self.set = set
-        self.abortToken = abortToken
+        self.delete = delete
+        self.abortSignal = abortSignal
         self.cns = cns
+        self.stimulation = stimulation
     }
 }
 
-// Typed context helpers
 public struct CNSContextKey<T> { public init() {} }
+
 public extension CNSLocalCtx {
     func get<T>(_ key: CNSContextKey<T>) -> T? { get() as? T }
     func set<T>(_ key: CNSContextKey<T>, _ value: T?) { set(value) }
@@ -200,46 +179,74 @@ public extension CNSLocalCtx {
 
 public typealias CNSDendriteResponse = (_ payload: Any?, _ axon: CNSAxon, _ ctx: CNSLocalCtx) -> Any?
 
-// Eventual response helper to support async dendrite responses (compatible with Any? return)
 public enum CNSEventual {
     case immediate(Any?)
     case future((_ complete: @escaping (Any?) -> Void) -> Void)
 }
 
-// Protocol for type erasure
-public protocol CNSAnyCollateral {
-    var type: String { get }
-    func createSignal<Payload>(_ payload: Payload?) -> CNSSignal<Payload>
-}
+public typealias CNSTypedDendriteResponse<Input> = (_ payload: Input?, _ axon: CNSAxon, _ ctx: CNSLocalCtx) -> Any?
 
-extension CNSCollateral: CNSAnyCollateral {
-    public func createSignal<NewPayload>(_ payload: NewPayload?) -> CNSSignal<NewPayload> {
-        return CNSSignal(collateralType: self.type, payload: payload)
+// MARK: - Modality / afferent path (TS parity)
+
+public final class CNSAfferentPath: Hashable, @unchecked Sendable {
+    public let parentAfferentPath: CNSAfferentPath?
+
+    public init(parentAfferentPath: CNSAfferentPath? = nil) {
+        self.parentAfferentPath = parentAfferentPath
+    }
+
+    public static func == (lhs: CNSAfferentPath, rhs: CNSAfferentPath) -> Bool {
+        lhs === rhs
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(self))
     }
 }
 
-// Type-safe dendrite response with full axon access
-public typealias CNSTypedDendriteResponse<Input> = (_ payload: Input?, _ axon: CNSAxon, _ ctx: CNSLocalCtx) -> Any?
+public final class CNSModality: Hashable, @unchecked Sendable {
+    public var afferentPaths: [AnyHashable: CNSAfferentPath]
+
+    public init(afferentPaths: [AnyHashable: CNSAfferentPath] = [:]) {
+        self.afferentPaths = afferentPaths
+    }
+
+    public static func == (lhs: CNSModality, rhs: CNSModality) -> Bool {
+        lhs === rhs
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(self))
+    }
+}
+
+// MARK: - Dendrite
 
 public struct CNSDendrite {
-    public let inputCollateralType: String
+    public let inputCollateral: AnyObject
     public let response: CNSDendriteResponse
-    
-    // Type-safe initializer with full axon access
+
+    func matchesInputCollateral(_ obj: AnyObject) -> Bool {
+        ObjectIdentifier(obj) == ObjectIdentifier(inputCollateral)
+    }
+
+    public init(inputCollateral: AnyObject, response: @escaping CNSDendriteResponse) {
+        self.inputCollateral = inputCollateral
+        self.response = response
+    }
+
     public init<Input>(inputCollateral: CNSCollateral<Input>, typedResponse: @escaping CNSTypedDendriteResponse<Input>) {
-        self.inputCollateralType = inputCollateral.type
+        self.inputCollateral = inputCollateral
         self.response = { payload, axon, ctx in
             guard let typedPayload = payload as? Input else { return nil }
             return typedResponse(typedPayload, axon, ctx)
         }
     }
 
-    // Strict non-optional payload initializer; use Input == Void to model no-payload
     public init<Input>(inputCollateral: CNSCollateral<Input>, strictResponse: @escaping (_ payload: Input, _ axon: CNSAxon, _ ctx: CNSLocalCtx) -> Any?) {
-        self.inputCollateralType = inputCollateral.type
+        self.inputCollateral = inputCollateral
         self.response = { payload, axon, ctx in
             if Input.self == Void.self {
-                // Treat Void as no payload
                 return strictResponse(() as! Input, axon, ctx)
             }
             guard let p = payload as? Input else { return nil }
@@ -247,9 +254,8 @@ public struct CNSDendrite {
         }
     }
 
-    // Throwing response routed to a dedicated error collateral (instance)
     public init<Input, E: Error>(inputCollateral: CNSCollateral<Input>, errorCollateral: CNSCollateral<E>, throwingResponse: @escaping (_ payload: Input, _ axon: CNSAxon, _ ctx: CNSLocalCtx) throws -> Any?) {
-        self.inputCollateralType = inputCollateral.type
+        self.inputCollateral = inputCollateral
         self.response = { payload, axon, ctx in
             do {
                 if Input.self == Void.self {
@@ -260,199 +266,241 @@ public struct CNSDendrite {
             } catch let e as E {
                 return errorCollateral.createSignal(e)
             } catch {
-                // Fallback to error channel via onResponse error path
                 return nil
             }
         }
     }
 
-    // Throwing response routed to a dedicated error collateral (by type, resolved at runtime from axon)
-    public init<Input, E: Error>(inputCollateral: CNSCollateral<Input>, errorCollateralType: CNSCollateralType<E>, throwingResponse: @escaping (_ payload: Input, _ axon: CNSAxon, _ ctx: CNSLocalCtx) throws -> Any?) {
-        self.inputCollateralType = inputCollateral.type
-        self.response = { payload, axon, ctx in
-            do {
-                if Input.self == Void.self {
-                    return try throwingResponse(() as! Input, axon, ctx)
-                }
-                guard let p = payload as? Input else { return nil }
-                return try throwingResponse(p, axon, ctx)
-            } catch let e as E {
-                let ch: CNSCollateral<E> = axon.getForce(errorCollateralType)
-                return ch.createSignal(e)
-            } catch {
-                return nil
-            }
-        }
-    }
-    
-    // Legacy initializer for backward compatibility
-    public init(collateralType: String, response: @escaping CNSDendriteResponse) {
-        self.inputCollateralType = collateralType
-        self.response = response
-    }
-    
-    // Computed property for backward compatibility
-    public var collateralType: String {
-        return inputCollateralType
-    }
 }
 
-public final class CNSNeuron {
-    public let name: String
+// MARK: - Neuron
+
+public final class CNSNeuron: Hashable {
     public let axon: CNSAxon
     public let dendrites: [CNSDendrite]
     public var concurrency: Int?
-    public init(name: String, axon: CNSAxon, dendrites: [CNSDendrite], concurrency: Int? = nil) {
-        self.name = name
+    /// Mirrors TS `maxDuration` metadata. Swift cannot safely terminate arbitrary synchronous closures.
+    public var maxDurationMillis: Int?
+
+    public init(axon: CNSAxon, dendrites: [CNSDendrite], concurrency: Int? = nil, maxDurationMillis: Int? = nil) {
         self.axon = axon
         self.dendrites = dendrites
         self.concurrency = concurrency
+        self.maxDurationMillis = maxDurationMillis
+    }
+
+    public static func == (lhs: CNSNeuron, rhs: CNSNeuron) -> Bool { lhs === rhs }
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(self))
     }
 }
 
+// MARK: - Responses
+
 public struct CNSResponse<TIn, TOut> {
-    public let input: CNSSignal<TIn>?
-    public let output: CNSSignal<TOut>?
+    public let inputSignal: CNSSignal<TIn>?
+    public let outputSignal: CNSSignal<TOut>?
     public let error: Error?
     public let queueLength: Int
+    public let modality: CNSModality?
+    public let afferentPath: CNSAfferentPath?
+    /// TS `contextValue` — snapshot of stimulation context store (object keys → `ObjectIdentifier` in Swift).
+    public let contextValue: [ObjectIdentifier: Any]
+    public let hops: Int?
+    public let stimulation: CNSStimulation?
+
+    public init(
+        inputSignal: CNSSignal<TIn>?,
+        outputSignal: CNSSignal<TOut>?,
+        error: Error?,
+        queueLength: Int,
+        modality: CNSModality? = nil,
+        afferentPath: CNSAfferentPath? = nil,
+        contextValue: [ObjectIdentifier: Any] = [:],
+        hops: Int? = nil,
+        stimulation: CNSStimulation? = nil
+    ) {
+        self.inputSignal = inputSignal
+        self.outputSignal = outputSignal
+        self.error = error
+        self.queueLength = queueLength
+        self.modality = modality
+        self.afferentPath = afferentPath
+        self.contextValue = contextValue
+        self.hops = hops
+        self.stimulation = stimulation
+    }
 }
 
 public struct CNSStimulationOptions<TIn, TOut> {
     public var onResponse: ((_ response: CNSResponse<TIn, TOut>) -> Void)?
-    public var cancelToken: CNSCancellationToken?
-    public var maxHops: Int?
-    public var runConcurrency: Int?
-    public var scheduler: CNSScheduler?
+    public var abortSignal: CNSAbortSignal?
+    public var maxNeuronHops: Int?
+    public var concurrency: Int?
+    public var ctx: CNSStimulationContextStoreProtocol?
+    public var modality: CNSModality?
+    public var afferentPath: CNSAfferentPath?
+    public var stimulationContext: Any?
+    /// Dispatches async `CNSEventual.future` completions; defaults to a global queue.
+    public var continuationScheduler: CNSScheduler?
+
     public init(
         onResponse: ((_ response: CNSResponse<TIn, TOut>) -> Void)? = nil,
-        cancelToken: CNSCancellationToken? = nil,
-        maxHops: Int? = nil,
-        runConcurrency: Int? = nil,
-        scheduler: CNSScheduler? = nil
+        abortSignal: CNSAbortSignal? = nil,
+        maxNeuronHops: Int? = nil,
+        concurrency: Int? = nil,
+        ctx: CNSStimulationContextStoreProtocol? = nil,
+        modality: CNSModality? = nil,
+        afferentPath: CNSAfferentPath? = nil,
+        stimulationContext: Any? = nil,
+        continuationScheduler: CNSScheduler? = nil
     ) {
         self.onResponse = onResponse
-        self.cancelToken = cancelToken
-        self.maxHops = maxHops
-        self.runConcurrency = runConcurrency
-        self.scheduler = scheduler
+        self.abortSignal = abortSignal
+        self.maxNeuronHops = maxNeuronHops
+        self.concurrency = concurrency
+        self.ctx = ctx
+        self.modality = modality
+        self.afferentPath = afferentPath
+        self.stimulationContext = stimulationContext
+        self.continuationScheduler = continuationScheduler
     }
 }
 
+/// Global `TCNSOptions`: only `autoCleanupContexts` remains in the TS core.
 public struct CNSOptions {
     public var autoCleanupContexts: Bool
-    public var scheduler: CNSScheduler?
-    public init(autoCleanupContexts: Bool = false, scheduler: CNSScheduler? = nil) {
+    public init(autoCleanupContexts: Bool = false) {
         self.autoCleanupContexts = autoCleanupContexts
-        self.scheduler = scheduler
     }
 }
 
-public final class CNS {
-    private let neurons: [CNSNeuron]
-    private let options: CNSOptions?
-    private let scheduler: CNSScheduler
+// MARK: - Per-instance neuron queue (TS `CNSInstanceNeuronQueue`)
 
-    // Global listeners (untyped response)
-    public struct CNSAnyResponse {
-        public let input: Any?
-        public let output: Any?
-        public let error: Error?
-        public let queueLength: Int
+public final class CNSInstanceNeuronQueue {
+    private var gates: [ObjectIdentifier: (limit: Int, active: Int, waiters: [() -> Void])] = [:]
+
+    public init() {}
+
+    public func run(neuron: CNSNeuron, _ fn: @escaping () -> Void) {
+        guard let limit = neuron.concurrency, limit > 0 else {
+            fn()
+            return
+        }
+        let oid = ObjectIdentifier(neuron)
+        var gate = gates[oid] ?? (limit, 0, [])
+        gate.limit = limit
+        if gate.active < gate.limit {
+            gate.active += 1
+            gates[oid] = gate
+            fn()
+        } else {
+            gate.waiters.append { [weak self] in
+                guard let self else {
+                    fn()
+                    return
+                }
+                var g = self.gates[oid] ?? (limit, 0, [])
+                g.active += 1
+                self.gates[oid] = g
+                fn()
+            }
+            gates[oid] = gate
+        }
     }
-    private var globalListeners: [(_ r: CNSAnyResponse) -> Void] = []
 
-    // Global per-neuron gates (simple counting, single-threaded expected)
-    private var neuronGates: [String: (limit: Int, active: Int, waiters: [() -> Void]) ] = [:]
+    func release(neuron: CNSNeuron) {
+        let oid = ObjectIdentifier(neuron)
+        guard var gate = gates[oid] else { return }
+        gate.active = max(0, gate.active - 1)
+        if !gate.waiters.isEmpty {
+            let next = gate.waiters.removeFirst()
+            gates[oid] = gate
+            next()
+        } else {
+            gates[oid] = gate
+        }
+    }
+}
 
-    // Indexes/topology
-    private var subIndex: [String: [(CNSNeuron, CNSDendrite)]] = [:]
-    private var parentNeuronByCollateralType: [String: CNSNeuron] = [:]
-    public private(set) var stronglyConnectedComponents: [Set<String>] = []
-    private var neuronToSCC: [String: Int] = [:]
+// MARK: - Network graph
+
+public final class CNSNetwork {
+    private let neurons: [CNSNeuron]
+
+    public private(set) var stronglyConnectedComponents: [Set<CNSNeuron>] = []
+    private var neuronToSCC: [ObjectIdentifier: Int] = [:]
     private var sccDag: [Int: Set<Int>] = [:]
     private var sccAncestors: [Int: Set<Int>] = [:]
 
-    public init(_ neurons: [CNSNeuron], options: CNSOptions? = nil) {
+    private var subIndex: [ObjectIdentifier: [(CNSNeuron, CNSDendrite)]] = [:]
+    private var parentNeuronByCollateral: [ObjectIdentifier: CNSNeuron] = [:]
+
+    public init(neurons: [CNSNeuron]) {
         self.neurons = neurons
-        self.options = options
-        self.scheduler = options?.scheduler ?? CNSSyncScheduler()
-        self.validateUniqueIdentifiers()
-        self.buildIndexes()
-        if options?.autoCleanupContexts == true { self.buildSCC() }
+        buildIndexes()
+        buildSCC()
     }
 
-    // MARK: Unique validation
-    private func validateUniqueIdentifiers() {
-        var errors: [String] = []
-        var seenNames = Set<String>()
-        var typeOwner: [String: String] = [:]
-
-        for n in neurons {
-            if n.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { errors.append("Neuron has empty name") }
-            if seenNames.contains(n.name) { errors.append("Duplicate neuron name: \(n.name)") } else { seenNames.insert(n.name) }
-            for t in n.axon.byType.keys {
-                if let prev = typeOwner[t], prev != n.name { errors.append("Collateral type \(t) is owned by both \(prev) and \(n.name)") }
-                else { typeOwner[t] = n.name }
-            }
-        }
-        if !errors.isEmpty { fatalError("[CNS] Uniqueness failed:\n - " + errors.joined(separator: "\n - ")) }
-    }
-
-    // MARK: Indexes
     private func buildIndexes() {
         subIndex.removeAll()
-        parentNeuronByCollateralType.removeAll()
+        parentNeuronByCollateral.removeAll()
         for n in neurons {
             for d in n.dendrites {
-                subIndex[d.inputCollateralType, default: []].append((n, d))
+                let key = ObjectIdentifier(d.inputCollateral)
+                subIndex[key, default: []].append((n, d))
             }
-            for t in n.axon.byType.keys { parentNeuronByCollateralType[t] = n }
+            for collateralObj in n.axon.collateralInstances() {
+                parentNeuronByCollateral[ObjectIdentifier(collateralObj)] = n
+            }
         }
     }
 
-    public func getSubscribers(collateralType: String) -> [(CNSNeuron, CNSDendrite)] {
-        return subIndex[collateralType] ?? []
+    public func getSubscribers(collateral: AnyObject) -> [(CNSNeuron, CNSDendrite)] {
+        subIndex[ObjectIdentifier(collateral)] ?? []
     }
 
-    public func getParentNeuronByCollateralType(collateralType: String) -> CNSNeuron? {
-        return parentNeuronByCollateralType[collateralType]
+    public func getParentNeuron(forCollateral collateral: AnyObject) -> CNSNeuron? {
+        parentNeuronByCollateral[ObjectIdentifier(collateral)]
     }
 
-    // MARK: SCC Graph
-    private func buildNeuronGraph() -> [String: Set<String>] {
-        var graph: [String: Set<String>] = [:]
-        let neuronNames = neurons.map { $0.name }
-        neuronNames.forEach { graph[$0] = Set<String>() }
-        // edges: neuron -> neurons it can reach via its axon's collaterals
+    private func buildNeuronGraph() -> [ObjectIdentifier: Set<ObjectIdentifier>] {
+        var graph: [ObjectIdentifier: Set<ObjectIdentifier>] = [:]
         for n in neurons {
-            var reachable = Set<String>()
-            for t in n.axon.byType.keys {
-                if let subs = subIndex[t] {
-                    for (target, _) in subs { reachable.insert(target.name) }
+            graph[ObjectIdentifier(n)] = []
+        }
+        for n in neurons {
+            var reachable = Set<ObjectIdentifier>()
+            for collateralObj in n.axon.collateralInstances() {
+                for (target, _) in getSubscribers(collateral: collateralObj) {
+                    reachable.insert(ObjectIdentifier(target))
                 }
             }
-            graph[n.name] = reachable
+            graph[ObjectIdentifier(n)] = reachable
         }
         return graph
     }
 
     private func buildSCC() {
-        let graph = buildNeuronGraph()
-        let neuronIds = neurons.map { $0.name }
-        var index: [String: Int] = [:]
-        var lowlink: [String: Int] = [:]
-        var onStack = Set<String>()
-        var stack: [String] = []
-        var components: [Set<String>] = []
+        let graphOID = buildNeuronGraph()
+        let neuronIds = neurons.map { ObjectIdentifier($0) }
+        var oidToNeuron: [ObjectIdentifier: CNSNeuron] = [:]
+        for n in neurons { oidToNeuron[ObjectIdentifier(n)] = n }
+
+        var index: [ObjectIdentifier: Int] = [:]
+        var lowlink: [ObjectIdentifier: Int] = [:]
+        var onStack = Set<ObjectIdentifier>()
+        var stack: [ObjectIdentifier] = []
+        var components: [Set<ObjectIdentifier>] = []
         var currentIndex = 0
 
-        func strongConnect(_ v: String) {
+        func strongConnect(_ v: ObjectIdentifier) {
             index[v] = currentIndex
             lowlink[v] = currentIndex
             currentIndex += 1
             stack.append(v)
             onStack.insert(v)
-            for w in graph[v] ?? Set<String>() {
+            for w in graphOID[v] ?? [] {
                 if index[w] == nil {
                     strongConnect(w)
                     lowlink[v] = min(lowlink[v]!, lowlink[w]!)
@@ -461,8 +509,8 @@ public final class CNS {
                 }
             }
             if lowlink[v] == index[v] {
-                var component = Set<String>()
-                var w: String
+                var component = Set<ObjectIdentifier>()
+                var w: ObjectIdentifier
                 repeat {
                     w = stack.removeLast()
                     onStack.remove(w)
@@ -472,23 +520,35 @@ public final class CNS {
             }
         }
 
-        for v in neuronIds { if index[v] == nil { strongConnect(v) } }
-        stronglyConnectedComponents = components
+        for v in neuronIds where index[v] == nil {
+            strongConnect(v)
+        }
+
+        stronglyConnectedComponents = components.map { oidSet in
+            Set(oidSet.compactMap { oidToNeuron[$0] })
+        }
+
         neuronToSCC.removeAll()
-        for (i, comp) in components.enumerated() { for v in comp { neuronToSCC[v] = i } }
-        buildSCCDAG(graph: graph)
+        for (i, comp) in stronglyConnectedComponents.enumerated() {
+            for neuron in comp {
+                neuronToSCC[ObjectIdentifier(neuron)] = i
+            }
+        }
+        buildSCCDAG(graphOID: graphOID)
         buildSCCAncestors()
     }
 
-    private func buildSCCDAG(graph: [String: Set<String>]) {
+    private func buildSCCDAG(graphOID: [ObjectIdentifier: Set<ObjectIdentifier>]) {
         sccDag.removeAll()
-        for i in 0..<(stronglyConnectedComponents.count) { sccDag[i] = Set<Int>() }
+        for i in 0..<stronglyConnectedComponents.count { sccDag[i] = [] }
         for (i, scc) in stronglyConnectedComponents.enumerated() {
-            for neuronId in scc {
-                for neighbor in graph[neuronId] ?? Set<String>() {
-                    if let neighborScc = neuronToSCC[neighbor], neighborScc != i {
-                        sccDag[neighborScc, default: Set<Int>()].insert(i)
-                    }
+            for neuron in scc {
+                let oid = ObjectIdentifier(neuron)
+                for neighborOID in graphOID[oid] ?? [] {
+                    guard let neighbor = neurons.first(where: { ObjectIdentifier($0) == neighborOID }),
+                          let neighborScc = neuronToSCC[ObjectIdentifier(neighbor)],
+                          neighborScc != i else { continue }
+                    sccDag[neighborScc, default: []].insert(i)
                 }
             }
         }
@@ -496,21 +556,19 @@ public final class CNS {
 
     private func buildSCCAncestors() {
         sccAncestors.removeAll()
-        for i in 0..<(stronglyConnectedComponents.count) { sccAncestors[i] = Set<Int>() }
-        // in-degree
+        for i in 0..<stronglyConnectedComponents.count { sccAncestors[i] = [] }
         var inDegree: [Int: Int] = [:]
         var queue: [Int] = []
-        for i in 0..<(stronglyConnectedComponents.count) {
+        for i in 0..<stronglyConnectedComponents.count {
             let incoming = sccDag[i]?.count ?? 0
             inDegree[i] = incoming
             if incoming == 0 { queue.append(i) }
         }
         while !queue.isEmpty {
             let current = queue.removeFirst()
-            // outgoing edges: all scc that have current as incoming
             let outgoing = getOutgoingEdges(sccIndex: current)
             for neighbor in outgoing {
-                var set = sccAncestors[neighbor] ?? Set<Int>()
+                var set = sccAncestors[neighbor] ?? []
                 set.insert(current)
                 if let currAnc = sccAncestors[current] { set.formUnion(currAnc) }
                 sccAncestors[neighbor] = set
@@ -523,34 +581,188 @@ public final class CNS {
 
     private func getOutgoingEdges(sccIndex: Int) -> Set<Int> {
         var outgoing = Set<Int>()
-        for (target, incoming) in sccDag {
-            if incoming.contains(sccIndex) { outgoing.insert(target) }
+        for (target, incoming) in sccDag where incoming.contains(sccIndex) {
+            outgoing.insert(target)
         }
         return outgoing
     }
 
-    public func getSCCSetByNeuronName(_ neuronName: String) -> Set<String>? {
-        guard let idx = neuronToSCC[neuronName] else { return nil }
+    public func getSCCSet(neuron: CNSNeuron) -> Set<CNSNeuron>? {
+        guard let idx = neuronToSCC[ObjectIdentifier(neuron)] else { return nil }
         return stronglyConnectedComponents[idx]
     }
 
-    public func getSccIndexByNeuronName(_ neuronName: String) -> Int? { neuronToSCC[neuronName] }
-
-    public func canNeuronBeGuaranteedDone(neuronName: String, activeSccCounts: [Int: Int]) -> Bool {
-        guard let sccIndex = neuronToSCC[neuronName] else { return true }
-        if let cnt = activeSccCounts[sccIndex], cnt > 0 { return false }
-        guard let ancestors = sccAncestors[sccIndex] else { return true }
-        for anc in ancestors { if let cnt = activeSccCounts[anc], cnt > 0 { return false } }
-        return true
+    public func getSccIndex(neuron: CNSNeuron) -> Int? {
+        neuronToSCC[ObjectIdentifier(neuron)]
     }
 
-    // MARK: Listeners
+    public func canNeuronBeGuaranteedDone(neuron: CNSNeuron, activeSccCounts: [Int: Int]) -> Bool {
+        guard let sccIndex = neuronToSCC[ObjectIdentifier(neuron)] else { return true }
+        if let cnt = activeSccCounts[sccIndex], cnt > 0 { return false }
+        guard let ancestors = sccAncestors[sccIndex] else { return true }
+        for anc in ancestors {
+            if let cnt = activeSccCounts[anc], cnt > 0 { return false }
+        }
+        return true
+    }
+}
+
+// MARK: - Activation task (TS `TCNSNeuronActivationTask`)
+
+public final class CNSNeuronActivationTask {
+    public let neuron: CNSNeuron
+    public let dendriteCollateral: AnyObject
+    public let input: Any?
+
+    public init(neuron: CNSNeuron, dendriteCollateral: AnyObject, input: Any?) {
+        self.neuron = neuron
+        self.dendriteCollateral = dendriteCollateral
+        self.input = input
+    }
+}
+
+// MARK: - Activation task failure (TS `TCNSNeuronActivationTaskFailure`)
+
+public struct CNSNeuronActivationTaskFailure {
+    public let task: CNSNeuronActivationTask
+    public let error: Error
+    public let aborted: Bool
+
+    public init(task: CNSNeuronActivationTask, error: Error, aborted: Bool) {
+        self.task = task
+        self.error = error
+        self.aborted = aborted
+    }
+}
+
+// MARK: - Stimulation handle
+
+public final class CNSStimulation {
+    public weak var cns: CNS?
+    public private(set) var isComplete: Bool = false
+
+    /// Mirrors TS fields read from `stimulation.options` inside dendrites / modality helpers.
+    public private(set) var modality: CNSModality?
+    public private(set) var afferentPath: CNSAfferentPath?
+    public private(set) var stimulationContext: Any?
+    public private(set) var maxNeuronHops: Int?
+
+    private var queuedTasks: [CNSNeuronActivationTask] = []
+    private var activeTasks: [CNSNeuronActivationTask] = []
+    private var failedTasks: [CNSNeuronActivationTaskFailure] = []
+
+    public init(cns: CNS) {
+        self.cns = cns
+    }
+
+    func attachOptions<TIn, TOut>(_ options: CNSStimulationOptions<TIn, TOut>) {
+        modality = options.modality
+        afferentPath = options.afferentPath
+        stimulationContext = options.stimulationContext
+        maxNeuronHops = options.maxNeuronHops
+    }
+
+    func markComplete() {
+        isComplete = true
+    }
+
+    func queueTask(_ task: CNSNeuronActivationTask) {
+        queuedTasks.append(task)
+    }
+
+    func startTask(_ task: CNSNeuronActivationTask) {
+        if let idx = queuedTasks.firstIndex(where: { $0 === task }) {
+            queuedTasks.remove(at: idx)
+        }
+        activeTasks.append(task)
+    }
+
+    func finishTask(_ task: CNSNeuronActivationTask) {
+        if let idx = activeTasks.firstIndex(where: { $0 === task }) {
+            activeTasks.remove(at: idx)
+        }
+    }
+
+    func failTask(_ task: CNSNeuronActivationTask, error: Error, aborted: Bool) {
+        finishTask(task)
+        if let idx = queuedTasks.firstIndex(where: { $0 === task }) {
+            queuedTasks.remove(at: idx)
+        }
+        failedTasks.append(CNSNeuronActivationTaskFailure(task: task, error: error, aborted: aborted))
+    }
+
+    func failQueuedTasks(error: Error, aborted: Bool) {
+        for task in queuedTasks {
+            failedTasks.append(CNSNeuronActivationTaskFailure(task: task, error: error, aborted: aborted))
+        }
+        queuedTasks.removeAll()
+    }
+
+    public func getAllActivationTasks() -> [CNSNeuronActivationTask] {
+        queuedTasks + activeTasks
+    }
+
+    public func getFailedTasks() -> [CNSNeuronActivationTaskFailure] {
+        failedTasks
+    }
+
+    /// TS parity hook; synchronous Swift core completes before this is awaited.
+    public func waitUntilComplete() async {
+        await Task.yield()
+    }
+}
+
+// MARK: - ICNS (TS `ICNS`)
+
+public protocol ICNS: AnyObject {
+    var network: CNSNetwork { get }
+    var options: CNSOptions? { get }
+
+    @discardableResult
+    func addResponseListener(_ listener: @escaping (_ response: CNS.CNSAnyResponse) -> Void) -> () -> Void
+
+    func stimulate<TIn, TOut>(_ signal: CNSSignal<TIn>, _ options: CNSStimulationOptions<TIn, TOut>) -> CNSStimulation
+    func stimulate<TIn, TOut>(_ signals: [CNSSignal<TIn>], _ options: CNSStimulationOptions<TIn, TOut>) -> CNSStimulation
+    func activate<TIn, TOut>(_ tasks: [CNSNeuronActivationTask], _ options: CNSStimulationOptions<TIn, TOut>) -> CNSStimulation
+}
+
+// MARK: - CNS
+
+public final class CNS: ICNS {
+    private let neurons: [CNSNeuron]
+    public let options: CNSOptions?
+
+    public let network: CNSNetwork
+    fileprivate let instanceNeuronQueue = CNSInstanceNeuronQueue()
+    private let defaultContinuationScheduler: CNSScheduler
+
+    public struct CNSAnyResponse {
+        public let inputSignal: Any?
+        public let outputSignal: Any?
+        public let error: Error?
+        public let queueLength: Int
+        public let modality: CNSModality?
+        public let afferentPath: CNSAfferentPath?
+        public let contextValue: [ObjectIdentifier: Any]
+        public let hops: Int?
+        public let stimulation: CNSStimulation?
+    }
+
+    private var globalListeners: [(_ r: CNSAnyResponse) -> Void] = []
+
+    public init(_ neurons: [CNSNeuron], options: CNSOptions? = nil, continuationScheduler: CNSScheduler = CNSAsyncScheduler()) {
+        self.neurons = neurons
+        self.options = options
+        self.network = CNSNetwork(neurons: neurons)
+        self.defaultContinuationScheduler = continuationScheduler
+    }
+
     @discardableResult
     public func addResponseListener(_ f: @escaping (_ r: CNSAnyResponse) -> Void) -> () -> Void {
         globalListeners.append(f)
         var active = true
         return { [weak self] in
-            guard let self = self, active else { return }
+            guard let self, active else { return }
             active = false
             if let i = self.globalListeners.firstIndex(where: { ObjectIdentifier($0 as AnyObject) == ObjectIdentifier(f as AnyObject) }) {
                 self.globalListeners.remove(at: i)
@@ -558,15 +770,20 @@ public final class CNS {
         }
     }
 
-    private func wrapOnResponse<TIn, TOut>(_ local: ((_ r: CNSResponse<TIn, TOut>) -> Void)?) -> (_ r: CNSAnyResponse) -> Void {
+    private func wrapOnResponse<TIn, TOut>(_ local: ((_ r: CNSResponse<TIn, TOut>) -> Void)?, modality: CNSModality?, afferentPath: CNSAfferentPath?, contextValue: @escaping () -> [ObjectIdentifier: Any], hopsProvider: @escaping () -> Int?) -> (_ r: CNSAnyResponse) -> Void {
         if globalListeners.isEmpty && local == nil { return { _ in } }
         return { [weak self] anyR in
-            if let local = local {
+            if let local {
                 let r = CNSResponse<TIn, TOut>(
-                    input: anyR.input as? CNSSignal<TIn>,
-                    output: anyR.output as? CNSSignal<TOut>,
+                    inputSignal: anyR.inputSignal as? CNSSignal<TIn>,
+                    outputSignal: anyR.outputSignal as? CNSSignal<TOut>,
                     error: anyR.error,
-                    queueLength: anyR.queueLength
+                    queueLength: anyR.queueLength,
+                    modality: anyR.modality ?? modality,
+                    afferentPath: anyR.afferentPath ?? afferentPath,
+                    contextValue: anyR.contextValue,
+                    hops: anyR.hops ?? hopsProvider(),
+                    stimulation: anyR.stimulation
                 )
                 local(r)
             }
@@ -574,49 +791,73 @@ public final class CNS {
         }
     }
 
-    // MARK: Gates
-    private func runWithConcurrency(neuron: CNSNeuron, _ fn: @escaping () -> Void) {
-        guard let limit = neuron.concurrency, limit > 0 else { fn(); return }
-        var gate = neuronGates[neuron.name] ?? (limit, 0, [])
-        gate.limit = limit
-        if gate.active < gate.limit {
-            gate.active += 1
-            neuronGates[neuron.name] = gate
-            fn()
-        } else {
-            gate.waiters.append { [weak self] in
-                guard var g = self?.neuronGates[neuron.name] else { fn(); return }
-                g.active += 1
-                self?.neuronGates[neuron.name] = g
-                fn()
-            }
-            neuronGates[neuron.name] = gate
-        }
+    private func continuationScheduler<TIn, TOut>(for options: CNSStimulationOptions<TIn, TOut>) -> CNSScheduler {
+        options.continuationScheduler ?? defaultContinuationScheduler
     }
 
-    private func releaseGate(for neuron: CNSNeuron) {
-        guard var gate = neuronGates[neuron.name] else { return }
-        gate.active = max(0, gate.active - 1)
-        if !gate.waiters.isEmpty {
-            let next = gate.waiters.removeFirst()
-            neuronGates[neuron.name] = gate
-            next()
-        } else {
-            neuronGates[neuron.name] = gate
+    private func collectOutputs(from response: Any?) -> [any CNSAnySignalProtocol] {
+        if let arr = response as? [Any] {
+            return arr.compactMap { $0 as? any CNSAnySignalProtocol }
         }
+        if let sig = response as? any CNSAnySignalProtocol {
+            return [sig]
+        }
+        return []
     }
 
-    // MARK: Stimulate
-    public func stimulate<TIn, TOut>(_ signal: CNSSignal<TIn>, _ options: CNSStimulationOptions<TIn, TOut> = .init()) {
-        let onResp = wrapOnResponse(options.onResponse)
-        var queue: [Any] = [signal]
+    /// Primary stimulation entry (TS `stimulate`).
+    @discardableResult
+    public func stimulate<TIn, TOut>(_ signal: CNSSignal<TIn>, _ options: CNSStimulationOptions<TIn, TOut> = .init()) -> CNSStimulation {
+        let stimulation = CNSStimulation(cns: self)
+        stimulation.attachOptions(options)
+        let ctxStore = options.ctx ?? CNSStimulationContextStore()
+        let scheduler = continuationScheduler(for: options)
+        let onResp = wrapOnResponse(
+            options.onResponse,
+            modality: options.modality,
+            afferentPath: options.afferentPath,
+            contextValue: { ctxStore.getAll() },
+            hopsProvider: { nil }
+        )
+
+        var queue: [any CNSAnySignalProtocol] = [signal as any CNSAnySignalProtocol]
         var inFlight = 0
-        var store: [String: Any] = [:]
         var activeSccCounts: [Int: Int] = [:]
-        var hopCount = 0
+        var neuronVisitCounts: [ObjectIdentifier: Int] = [:]
+        let wake = DispatchSemaphore(value: 0)
 
-        // Run-level concurrency gate
-        var runGate: (limit: Int, active: Int, waiters: [() -> Void]) = (limit: max(0, options.runConcurrency ?? 0), active: 0, waiters: [])
+        func hopCount(for neuron: CNSNeuron) -> Int {
+            neuronVisitCounts[ObjectIdentifier(neuron), default: 0]
+        }
+
+        func tryIncrementVisit(neuron: CNSNeuron) -> Bool {
+            guard let maxHops = options.maxNeuronHops else { return true }
+            let oid = ObjectIdentifier(neuron)
+            let next = neuronVisitCounts[oid, default: 0] + 1
+            if next > maxHops { return false }
+            neuronVisitCounts[oid] = next
+            return true
+        }
+
+        func incScc(for neuron: CNSNeuron) {
+            if options.abortSignal?.isAborted == true { return }
+            if let idx = network.getSccIndex(neuron: neuron) {
+                activeSccCounts[idx] = (activeSccCounts[idx] ?? 0) + 1
+            }
+        }
+
+        func decSccAndMaybeCleanup(for neuron: CNSNeuron) {
+            if let idx = network.getSccIndex(neuron: neuron) {
+                activeSccCounts[idx] = max(0, (activeSccCounts[idx] ?? 0) - 1)
+                if options.abortSignal?.isAborted != true, self.options?.autoCleanupContexts == true {
+                    if network.canNeuronBeGuaranteedDone(neuron: neuron, activeSccCounts: activeSccCounts) {
+                        ctxStore.delete(key: neuron)
+                    }
+                }
+            }
+        }
+
+        var runGate: (limit: Int, active: Int, waiters: [() -> Void]) = (limit: max(0, options.concurrency ?? 0), active: 0, waiters: [])
         func runWithRunConcurrency(_ fn: @escaping () -> Void) {
             if runGate.limit <= 0 {
                 fn()
@@ -632,6 +873,7 @@ public final class CNS {
                 }
             }
         }
+
         func releaseRunGate() {
             if runGate.limit <= 0 { return }
             runGate.active = max(0, runGate.active - 1)
@@ -641,70 +883,104 @@ public final class CNS {
             }
         }
 
-        func notifyDebug(_ input: Any?, _ output: Any?, _ error: Error?) { /* removed */ }
-
-        func incScc(for neuron: CNSNeuron) {
-            if options.cancelToken?.isCancelled == true { return }
-            if let idx = getSccIndexByNeuronName(neuron.name) {
-                activeSccCounts[idx] = (activeSccCounts[idx] ?? 0) + 1
-            }
-        }
-        func decSccAndMaybeCleanup(for neuron: CNSNeuron) {
-            if let idx = getSccIndexByNeuronName(neuron.name) {
-                activeSccCounts[idx] = max(0, (activeSccCounts[idx] ?? 0) - 1)
-                if (options.cancelToken?.isCancelled != true) && (self.options?.autoCleanupContexts == true) {
-                    if self.canNeuronBeGuaranteedDone(neuronName: neuron.name, activeSccCounts: activeSccCounts) {
-                        store[neuron.name] = nil
-                    }
-                }
-            }
+        if options.abortSignal?.isAborted == true {
+            stimulation.failQueuedTasks(
+                error: NSError(domain: "CNS", code: 2, userInfo: [NSLocalizedDescriptionKey: "Stimulation aborted"]),
+                aborted: true
+            )
         }
 
-        // initial trace for input signal
-        onResp(CNSAnyResponse(input: signal, output: nil, error: nil, queueLength: queue.count + inFlight))
+        onResp(CNSAnyResponse(
+            inputSignal: nil,
+            outputSignal: signal,
+            error: nil,
+            queueLength: queue.count + inFlight,
+            modality: options.modality,
+            afferentPath: options.afferentPath,
+            contextValue: ctxStore.getAll(),
+            hops: nil,
+            stimulation: stimulation
+        ))
 
-        let wake = DispatchSemaphore(value: 0)
         while true {
-            if options.cancelToken?.isCancelled == true { break }
-            let anySig: Any
+            if options.abortSignal?.isAborted == true { break }
+            let anySig: (any CNSAnySignalProtocol)?
             if !queue.isEmpty {
                 anySig = queue.removeFirst()
             } else if inFlight > 0 {
                 wake.wait()
                 continue
-            } else { break }
-            guard let sig = anySig as? CNSAnySignalProtocol else { continue }
-            let subs = self.getSubscribers(collateralType: sig.collateralType)
+            } else {
+                break
+            }
+            guard let sig = anySig else { continue }
+            let subs = network.getSubscribers(collateral: sig.collateralObject)
             for (neuron, dendrite) in subs {
-                if options.cancelToken?.isCancelled == true { continue }
+                if options.abortSignal?.isAborted == true { continue }
+                guard dendrite.matchesInputCollateral(sig.collateralObject) else { continue }
+                let task = CNSNeuronActivationTask(neuron: neuron, dendriteCollateral: dendrite.inputCollateral, input: sig)
+                stimulation.queueTask(task)
+                guard tryIncrementVisit(neuron: neuron) else {
+                    stimulation.failTask(
+                        task,
+                        error: NSError(domain: "CNS", code: 1, userInfo: [NSLocalizedDescriptionKey: "Max neuron hops reached when trying to enqueue subscriber"]),
+                        aborted: false
+                    )
+                    continue
+                }
                 incScc(for: neuron)
                 runWithRunConcurrency {
-                    self.runWithConcurrency(neuron: neuron) {
+                    self.instanceNeuronQueue.run(neuron: neuron) {
+                        stimulation.startTask(task)
                         let ctx = CNSLocalCtx(
-                            get: { store[neuron.name] },
-                            set: { v in store[neuron.name] = v },
-                            abortToken: options.cancelToken,
-                            cns: self
+                            get: { ctxStore.get(key: neuron) },
+                            set: { ctxStore.set(key: neuron, value: $0) },
+                            delete: { ctxStore.delete(key: neuron) },
+                            abortSignal: options.abortSignal,
+                            cns: self,
+                            stimulation: stimulation
                         )
                         let out = dendrite.response(sig.payloadAny, neuron.axon, ctx)
+
                         func handleImmediate(_ val: Any?) {
-                            self.releaseGate(for: neuron)
+                            stimulation.finishTask(task)
+                            self.instanceNeuronQueue.release(neuron: neuron)
                             releaseRunGate()
                             defer { decSccAndMaybeCleanup(for: neuron) }
-                            if let outSig = val as? CNSAnySignalProtocol {
-                                hopCount += 1
-                                let willAppend: Bool = {
-                                    if let maxHops = options.maxHops { return hopCount <= maxHops }
-                                    return true
-                                }()
-                                let nextQLen = (queue.count + inFlight) + (willAppend ? 1 : 0)
-                                onResp(CNSAnyResponse(input: anySig, output: val, error: nil, queueLength: nextQLen))
-                                if willAppend { queue.append(outSig) }
-                            } else {
+
+                            let outs = self.collectOutputs(from: val)
+                            if outs.isEmpty {
                                 let nextQLen = queue.count + inFlight
-                                onResp(CNSAnyResponse(input: anySig, output: nil, error: nil, queueLength: nextQLen))
+                                onResp(CNSAnyResponse(
+                                    inputSignal: sig,
+                                    outputSignal: nil,
+                                    error: nil,
+                                    queueLength: nextQLen,
+                                    modality: options.modality,
+                                    afferentPath: options.afferentPath,
+                                    contextValue: ctxStore.getAll(),
+                                    hops: hopCount(for: neuron),
+                                    stimulation: stimulation
+                                ))
+                                return
+                            }
+                            for outSig in outs {
+                                let nextQLen = (queue.count + inFlight) + 1
+                                onResp(CNSAnyResponse(
+                                    inputSignal: sig,
+                                    outputSignal: outSig,
+                                    error: nil,
+                                    queueLength: nextQLen,
+                                    modality: options.modality,
+                                    afferentPath: options.afferentPath,
+                                    contextValue: ctxStore.getAll(),
+                                    hops: hopCount(for: neuron),
+                                    stimulation: stimulation
+                                ))
+                                queue.append(outSig)
                             }
                         }
+
                         if let ev = out as? CNSEventual {
                             switch ev {
                             case .immediate(let v):
@@ -712,7 +988,7 @@ public final class CNS {
                             case .future(let producer):
                                 inFlight += 1
                                 producer { v in
-                                    (options.scheduler ?? self.scheduler).perform {
+                                    scheduler.perform {
                                         inFlight = max(0, inFlight - 1)
                                         handleImmediate(v)
                                         wake.signal()
@@ -726,19 +1002,464 @@ public final class CNS {
                 }
             }
         }
-        onResp(CNSAnyResponse(input: nil, output: nil, error: nil, queueLength: 0))
+
+        if options.abortSignal?.isAborted == true {
+            stimulation.failQueuedTasks(
+                error: NSError(domain: "CNS", code: 2, userInfo: [NSLocalizedDescriptionKey: "Stimulation aborted"]),
+                aborted: true
+            )
+        }
+
+        onResp(CNSAnyResponse(
+            inputSignal: nil,
+            outputSignal: nil,
+            error: nil,
+            queueLength: 0,
+            modality: options.modality,
+            afferentPath: options.afferentPath,
+            contextValue: ctxStore.getAll(),
+            hops: nil,
+            stimulation: stimulation
+        ))
+        stimulation.markComplete()
+        return stimulation
     }
 
-    // Convenience overloads to help type inference
-    public func stimulate<TIn>(_ signal: CNSSignal<TIn>) {
-        let opts = CNSStimulationOptions<TIn, Any>()
-        self.stimulate(signal, opts)
+    /// TS `stimulate` with multiple seed signals.
+    @discardableResult
+    public func stimulate<TIn, TOut>(_ signals: [CNSSignal<TIn>], _ options: CNSStimulationOptions<TIn, TOut> = .init()) -> CNSStimulation {
+        guard !signals.isEmpty else {
+            let stimulation = CNSStimulation(cns: self)
+            stimulation.markComplete()
+            return stimulation
+        }
+        let stimulation = CNSStimulation(cns: self)
+        stimulation.attachOptions(options)
+        let ctxStore = options.ctx ?? CNSStimulationContextStore()
+        let scheduler = continuationScheduler(for: options)
+        let onResp = wrapOnResponse(
+            options.onResponse,
+            modality: options.modality,
+            afferentPath: options.afferentPath,
+            contextValue: { ctxStore.getAll() },
+            hopsProvider: { nil }
+        )
+
+        var queue: [any CNSAnySignalProtocol] = signals.map { $0 as any CNSAnySignalProtocol }
+        var inFlight = 0
+        var activeSccCounts: [Int: Int] = [:]
+        var neuronVisitCounts: [ObjectIdentifier: Int] = [:]
+        let wake = DispatchSemaphore(value: 0)
+
+        func hopCount(for neuron: CNSNeuron) -> Int {
+            neuronVisitCounts[ObjectIdentifier(neuron), default: 0]
+        }
+
+        func tryIncrementVisit(neuron: CNSNeuron) -> Bool {
+            guard let maxHops = options.maxNeuronHops else { return true }
+            let oid = ObjectIdentifier(neuron)
+            let next = neuronVisitCounts[oid, default: 0] + 1
+            if next > maxHops { return false }
+            neuronVisitCounts[oid] = next
+            return true
+        }
+
+        func incScc(for neuron: CNSNeuron) {
+            if options.abortSignal?.isAborted == true { return }
+            if let idx = network.getSccIndex(neuron: neuron) {
+                activeSccCounts[idx] = (activeSccCounts[idx] ?? 0) + 1
+            }
+        }
+
+        func decSccAndMaybeCleanup(for neuron: CNSNeuron) {
+            if let idx = network.getSccIndex(neuron: neuron) {
+                activeSccCounts[idx] = max(0, (activeSccCounts[idx] ?? 0) - 1)
+                if options.abortSignal?.isAborted != true, self.options?.autoCleanupContexts == true {
+                    if network.canNeuronBeGuaranteedDone(neuron: neuron, activeSccCounts: activeSccCounts) {
+                        ctxStore.delete(key: neuron)
+                    }
+                }
+            }
+        }
+
+        var runGate: (limit: Int, active: Int, waiters: [() -> Void]) = (limit: max(0, options.concurrency ?? 0), active: 0, waiters: [])
+        func runWithRunConcurrency(_ fn: @escaping () -> Void) {
+            if runGate.limit <= 0 {
+                fn()
+                return
+            }
+            if runGate.active < runGate.limit {
+                runGate.active += 1
+                fn()
+            } else {
+                runGate.waiters.append {
+                    runGate.active += 1
+                    fn()
+                }
+            }
+        }
+
+        func releaseRunGate() {
+            if runGate.limit <= 0 { return }
+            runGate.active = max(0, runGate.active - 1)
+            if !runGate.waiters.isEmpty {
+                runGate.waiters.removeFirst()()
+            }
+        }
+
+        for s in signals {
+            onResp(CNSAnyResponse(
+                inputSignal: nil,
+                outputSignal: s,
+                error: nil,
+                queueLength: queue.count + inFlight,
+                modality: options.modality,
+                afferentPath: options.afferentPath,
+                contextValue: ctxStore.getAll(),
+                hops: nil,
+                stimulation: stimulation
+            ))
+        }
+
+        while true {
+            if options.abortSignal?.isAborted == true { break }
+            let anySig: (any CNSAnySignalProtocol)?
+            if !queue.isEmpty {
+                anySig = queue.removeFirst()
+            } else if inFlight > 0 {
+                wake.wait()
+                continue
+            } else {
+                break
+            }
+            guard let sig = anySig else { continue }
+            let subs = network.getSubscribers(collateral: sig.collateralObject)
+            for (neuron, dendrite) in subs {
+                if options.abortSignal?.isAborted == true { continue }
+                guard dendrite.matchesInputCollateral(sig.collateralObject) else { continue }
+                let task = CNSNeuronActivationTask(neuron: neuron, dendriteCollateral: dendrite.inputCollateral, input: sig)
+                stimulation.queueTask(task)
+                guard tryIncrementVisit(neuron: neuron) else {
+                    stimulation.failTask(
+                        task,
+                        error: NSError(domain: "CNS", code: 1, userInfo: [NSLocalizedDescriptionKey: "Max neuron hops reached when trying to enqueue subscriber"]),
+                        aborted: false
+                    )
+                    continue
+                }
+                incScc(for: neuron)
+                runWithRunConcurrency {
+                    self.instanceNeuronQueue.run(neuron: neuron) {
+                        stimulation.startTask(task)
+                        let ctx = CNSLocalCtx(
+                            get: { ctxStore.get(key: neuron) },
+                            set: { ctxStore.set(key: neuron, value: $0) },
+                            delete: { ctxStore.delete(key: neuron) },
+                            abortSignal: options.abortSignal,
+                            cns: self,
+                            stimulation: stimulation
+                        )
+                        let out = dendrite.response(sig.payloadAny, neuron.axon, ctx)
+
+                        func handleImmediate(_ val: Any?) {
+                            stimulation.finishTask(task)
+                            self.instanceNeuronQueue.release(neuron: neuron)
+                            releaseRunGate()
+                            defer { decSccAndMaybeCleanup(for: neuron) }
+
+                            let outs = self.collectOutputs(from: val)
+                            if outs.isEmpty {
+                                let nextQLen = queue.count + inFlight
+                                onResp(CNSAnyResponse(
+                                    inputSignal: sig,
+                                    outputSignal: nil,
+                                    error: nil,
+                                    queueLength: nextQLen,
+                                    modality: options.modality,
+                                    afferentPath: options.afferentPath,
+                                    contextValue: ctxStore.getAll(),
+                                    hops: hopCount(for: neuron),
+                                    stimulation: stimulation
+                                ))
+                                return
+                            }
+                            for outSig in outs {
+                                let nextQLen = (queue.count + inFlight) + 1
+                                onResp(CNSAnyResponse(
+                                    inputSignal: sig,
+                                    outputSignal: outSig,
+                                    error: nil,
+                                    queueLength: nextQLen,
+                                    modality: options.modality,
+                                    afferentPath: options.afferentPath,
+                                    contextValue: ctxStore.getAll(),
+                                    hops: hopCount(for: neuron),
+                                    stimulation: stimulation
+                                ))
+                                queue.append(outSig)
+                            }
+                        }
+
+                        if let ev = out as? CNSEventual {
+                            switch ev {
+                            case .immediate(let v):
+                                handleImmediate(v)
+                            case .future(let producer):
+                                inFlight += 1
+                                producer { v in
+                                    scheduler.perform {
+                                        inFlight = max(0, inFlight - 1)
+                                        handleImmediate(v)
+                                        wake.signal()
+                                    }
+                                }
+                            }
+                        } else {
+                            handleImmediate(out)
+                        }
+                    }
+                }
+            }
+        }
+
+        if options.abortSignal?.isAborted == true {
+            stimulation.failQueuedTasks(
+                error: NSError(domain: "CNS", code: 2, userInfo: [NSLocalizedDescriptionKey: "Stimulation aborted"]),
+                aborted: true
+            )
+        }
+
+        onResp(CNSAnyResponse(
+            inputSignal: nil,
+            outputSignal: nil,
+            error: nil,
+            queueLength: 0,
+            modality: options.modality,
+            afferentPath: options.afferentPath,
+            contextValue: ctxStore.getAll(),
+            hops: nil,
+            stimulation: stimulation
+        ))
+        stimulation.markComplete()
+        return stimulation
     }
 
-    public func stimulate<TIn, TOut>(_ signal: CNSSignal<TIn>, onResponse: ((_ r: CNSResponse<TIn, TOut>) -> Void)?) {
-        let opts = CNSStimulationOptions<TIn, TOut>(onResponse: onResponse)
-        self.stimulate(signal, opts)
+    /// TS `activate`: enqueue explicit dendrite activations (simplified synchronous propagation).
+    @discardableResult
+    public func activate<TIn, TOut>(_ tasks: [CNSNeuronActivationTask], _ options: CNSStimulationOptions<TIn, TOut> = .init()) -> CNSStimulation {
+        let wrappedSignals: [CNSSignal<TIn>] = tasks.compactMap { task in
+            guard let input = task.input else { return nil }
+            return input as? CNSSignal<TIn>
+        }
+        if wrappedSignals.count == tasks.count, !wrappedSignals.isEmpty {
+            return stimulate(wrappedSignals, options)
+        }
+
+        let stimulation = CNSStimulation(cns: self)
+        stimulation.attachOptions(options)
+        let ctxStore = options.ctx ?? CNSStimulationContextStore()
+        let scheduler = continuationScheduler(for: options)
+        let onResp = wrapOnResponse(
+            options.onResponse,
+            modality: options.modality,
+            afferentPath: options.afferentPath,
+            contextValue: { ctxStore.getAll() },
+            hopsProvider: { nil }
+        )
+
+        var queue: [any CNSAnySignalProtocol] = []
+        var inFlight = 0
+        var activeSccCounts: [Int: Int] = [:]
+        var neuronVisitCounts: [ObjectIdentifier: Int] = [:]
+        let wake = DispatchSemaphore(value: 0)
+
+        func hopCount(for neuron: CNSNeuron) -> Int {
+            neuronVisitCounts[ObjectIdentifier(neuron), default: 0]
+        }
+
+        func tryIncrementVisit(neuron: CNSNeuron) -> Bool {
+            guard let maxHops = options.maxNeuronHops else { return true }
+            let oid = ObjectIdentifier(neuron)
+            let next = neuronVisitCounts[oid, default: 0] + 1
+            if next > maxHops { return false }
+            neuronVisitCounts[oid] = next
+            return true
+        }
+
+        func incScc(for neuron: CNSNeuron) {
+            if options.abortSignal?.isAborted == true { return }
+            if let idx = network.getSccIndex(neuron: neuron) {
+                activeSccCounts[idx] = (activeSccCounts[idx] ?? 0) + 1
+            }
+        }
+
+        func decSccAndMaybeCleanup(for neuron: CNSNeuron) {
+            if let idx = network.getSccIndex(neuron: neuron) {
+                activeSccCounts[idx] = max(0, (activeSccCounts[idx] ?? 0) - 1)
+                if options.abortSignal?.isAborted != true, self.options?.autoCleanupContexts == true {
+                    if network.canNeuronBeGuaranteedDone(neuron: neuron, activeSccCounts: activeSccCounts) {
+                        ctxStore.delete(key: neuron)
+                    }
+                }
+            }
+        }
+
+        var runGate: (limit: Int, active: Int, waiters: [() -> Void]) = (limit: max(0, options.concurrency ?? 0), active: 0, waiters: [])
+        func runWithRunConcurrency(_ fn: @escaping () -> Void) {
+            if runGate.limit <= 0 {
+                fn()
+                return
+            }
+            if runGate.active < runGate.limit {
+                runGate.active += 1
+                fn()
+            } else {
+                runGate.waiters.append {
+                    runGate.active += 1
+                    fn()
+                }
+            }
+        }
+
+        func releaseRunGate() {
+            if runGate.limit <= 0 { return }
+            runGate.active = max(0, runGate.active - 1)
+            if !runGate.waiters.isEmpty {
+                runGate.waiters.removeFirst()()
+            }
+        }
+
+        func processDirect(neuron: CNSNeuron, dendrite: CNSDendrite, sig: (any CNSAnySignalProtocol)?) {
+            let task = CNSNeuronActivationTask(neuron: neuron, dendriteCollateral: dendrite.inputCollateral, input: sig)
+            stimulation.queueTask(task)
+            guard tryIncrementVisit(neuron: neuron) else {
+                stimulation.failTask(
+                    task,
+                    error: NSError(domain: "CNS", code: 1, userInfo: [NSLocalizedDescriptionKey: "Max neuron hops reached when trying to enqueue subscriber"]),
+                    aborted: false
+                )
+                return
+            }
+            incScc(for: neuron)
+            runWithRunConcurrency {
+                self.instanceNeuronQueue.run(neuron: neuron) {
+                    stimulation.startTask(task)
+                    let ctx = CNSLocalCtx(
+                        get: { ctxStore.get(key: neuron) },
+                        set: { ctxStore.set(key: neuron, value: $0) },
+                        delete: { ctxStore.delete(key: neuron) },
+                        abortSignal: options.abortSignal,
+                        cns: self,
+                        stimulation: stimulation
+                    )
+                    let out = dendrite.response(sig?.payloadAny, neuron.axon, ctx)
+
+                    func handleImmediate(_ val: Any?) {
+                        stimulation.finishTask(task)
+                        self.instanceNeuronQueue.release(neuron: neuron)
+                        releaseRunGate()
+                        defer { decSccAndMaybeCleanup(for: neuron) }
+
+                        let outs = self.collectOutputs(from: val)
+                        if outs.isEmpty {
+                            let nextQLen = queue.count + inFlight
+                            onResp(CNSAnyResponse(
+                                inputSignal: sig,
+                                outputSignal: nil,
+                                error: nil,
+                                queueLength: nextQLen,
+                                modality: options.modality,
+                                afferentPath: options.afferentPath,
+                                contextValue: ctxStore.getAll(),
+                                hops: hopCount(for: neuron),
+                                stimulation: stimulation
+                            ))
+                            return
+                        }
+                        for outSig in outs {
+                            let nextQLen = (queue.count + inFlight) + 1
+                            onResp(CNSAnyResponse(
+                                inputSignal: sig,
+                                outputSignal: outSig,
+                                error: nil,
+                                queueLength: nextQLen,
+                                modality: options.modality,
+                                afferentPath: options.afferentPath,
+                                contextValue: ctxStore.getAll(),
+                                hops: hopCount(for: neuron),
+                                stimulation: stimulation
+                            ))
+                            queue.append(outSig)
+                        }
+                    }
+
+                    if let ev = out as? CNSEventual {
+                        switch ev {
+                        case .immediate(let v):
+                            handleImmediate(v)
+                        case .future(let producer):
+                            inFlight += 1
+                            producer { v in
+                                scheduler.perform {
+                                    inFlight = max(0, inFlight - 1)
+                                    handleImmediate(v)
+                                    wake.signal()
+                                }
+                            }
+                        }
+                    } else {
+                        handleImmediate(out)
+                    }
+                }
+            }
+        }
+
+        for task in tasks {
+            guard let dendrite = task.neuron.dendrites.first(where: { $0.matchesInputCollateral(task.dendriteCollateral) }) else { continue }
+            let sig = task.input as? any CNSAnySignalProtocol
+            processDirect(neuron: task.neuron, dendrite: dendrite, sig: sig)
+        }
+
+        while true {
+            if options.abortSignal?.isAborted == true { break }
+            let anySig: (any CNSAnySignalProtocol)?
+            if !queue.isEmpty {
+                anySig = queue.removeFirst()
+            } else if inFlight > 0 {
+                wake.wait()
+                continue
+            } else {
+                break
+            }
+            guard let sig = anySig else { continue }
+            let subs = network.getSubscribers(collateral: sig.collateralObject)
+            for (neuron, dendrite) in subs {
+                if options.abortSignal?.isAborted == true { continue }
+                guard dendrite.matchesInputCollateral(sig.collateralObject) else { continue }
+                processDirect(neuron: neuron, dendrite: dendrite, sig: sig)
+            }
+        }
+
+        onResp(CNSAnyResponse(
+            inputSignal: nil,
+            outputSignal: nil,
+            error: nil,
+            queueLength: 0,
+            modality: options.modality,
+            afferentPath: options.afferentPath,
+            contextValue: ctxStore.getAll(),
+            hops: nil,
+            stimulation: stimulation
+        ))
+        stimulation.markComplete()
+        return stimulation
+    }
+
+    public func stimulate<TIn>(_ signal: CNSSignal<TIn>) -> CNSStimulation {
+        stimulate(signal, CNSStimulationOptions<TIn, Any>())
+    }
+
+    public func stimulate<TIn, TOut>(_ signal: CNSSignal<TIn>, onResponse: ((_ r: CNSResponse<TIn, TOut>) -> Void)?) -> CNSStimulation {
+        stimulate(signal, CNSStimulationOptions<TIn, TOut>(onResponse: onResponse))
     }
 }
-
-
