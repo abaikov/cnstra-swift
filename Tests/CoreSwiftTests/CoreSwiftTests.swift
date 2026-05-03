@@ -301,6 +301,91 @@ final class CoreSwiftTests: XCTestCase {
         XCTAssertEqual(qlens.last, 0)
     }
 
+    func testFutureCompletionResumesOnStimulateLane() {
+        let input = CNSCollateral<Int>()
+        let out = CNSCollateral<String>()
+        let axon = CNSAxon(out)
+        let d = CNSDendrite(inputCollateral: input) { (p: Int?, _, _) in
+            guard let v = p else { return nil }
+            return CNSEventual.future { complete in
+                DispatchQueue.global().async {
+                    complete(out.createSignal("v=\(v)"))
+                }
+            }
+        }
+        let cns = CNS([CNSNeuron(axon: axon, dendrites: [d])])
+
+        let stimulateThread = Thread.current
+        var outputHandledOnStimulateThread = false
+        _ = cns.addResponseListener { r in
+            if let s = r.outputSignal as? CNSSignal<String>, s.collateral === out {
+                outputHandledOnStimulateThread = Thread.current == stimulateThread
+            }
+        }
+
+        _ = cns.stimulate(input.createSignal(7))
+        XCTAssertTrue(outputHandledOnStimulateThread)
+    }
+
+    func testPerfSmokeRoutingThroughput() throws {
+        guard ProcessInfo.processInfo.environment["CNS_PERF_SMOKE"] == "1" else {
+            throw XCTSkip("Set CNS_PERF_SMOKE=1 to run the routing throughput smoke test.")
+        }
+
+        let input = CNSCollateral<Int>()
+        let out = CNSCollateral<Int>()
+        let axon = CNSAxon(out)
+        let d = CNSDendrite(inputCollateral: input) { (p: Int?, _, _) in
+            out.createSignal((p ?? 0) + 1)
+        }
+        let cns = CNS([CNSNeuron(axon: axon, dendrites: [d])])
+
+        var outputCount = 0
+        _ = cns.addResponseListener { r in
+            if let s = r.outputSignal as? CNSSignal<Int>, s.collateral === out {
+                outputCount += 1
+            }
+        }
+
+        let iterations = 100_000
+        let start = DispatchTime.now().uptimeNanoseconds
+        for i in 0..<iterations {
+            _ = cns.stimulate(input.createSignal(i))
+        }
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
+        let throughput = Double(iterations) / elapsed
+
+        print("CNS_PERF_SMOKE routing: \(iterations) stimulations in \(String(format: "%.4f", elapsed))s (\(Int(throughput))/s)")
+        XCTAssertEqual(outputCount, iterations)
+    }
+
+    func testDeepSignalChainDoesNotOverflowCallStack() {
+        let depth = ProcessInfo.processInfo.environment["CNS_DEEP_STACK_SMOKE"] == "1" ? 20_000 : 2_000
+        let collaterals = (0...depth).map { _ in CNSCollateral<Int>() }
+        var neurons: [CNSNeuron] = []
+
+        neurons.reserveCapacity(depth)
+        for i in 0..<depth {
+            let input = collaterals[i]
+            let output = collaterals[i + 1]
+            let dendrite = CNSDendrite(inputCollateral: input) { (payload: Int?, _, _) in
+                output.createSignal((payload ?? 0) + 1)
+            }
+            neurons.append(CNSNeuron(axon: CNSAxon(output), dendrites: [dendrite]))
+        }
+
+        let cns = CNS(neurons)
+        var finalValue: Int?
+        _ = cns.addResponseListener { r in
+            if let signal = r.outputSignal as? CNSSignal<Int>, signal.collateral === collaterals[depth] {
+                finalValue = signal.payload
+            }
+        }
+
+        _ = cns.stimulate(collaterals[0].createSignal(0))
+        XCTAssertEqual(finalValue, depth)
+    }
+
     func testModalityDendriteSelectsAfferentPathHandler() {
         let input = CNSCollateral<String>()
         let out = CNSCollateral<String>()

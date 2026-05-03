@@ -94,12 +94,68 @@ public final class CNSSyncScheduler: CNSScheduler {
     public func perform(_ work: @escaping () -> Void) { work() }
 }
 
-public final class CNSAsyncScheduler: CNSScheduler {
+public final class CNSSerialScheduler: CNSScheduler {
     private let queue: DispatchQueue
-    public init(qos: DispatchQoS = .userInitiated, label: String = "cnstra.scheduler.async") {
-        self.queue = DispatchQueue(label: label, qos: qos, attributes: .concurrent)
+    public init(qos: DispatchQoS = .userInitiated, label: String = "cnstra.scheduler.serial") {
+        self.queue = DispatchQueue(label: label, qos: qos)
     }
     public func perform(_ work: @escaping () -> Void) { queue.async(execute: work) }
+}
+
+final class CNSContinuationQueue {
+    private let lock = NSLock()
+    private var pending: [() -> Void] = []
+
+    func enqueue(_ work: @escaping () -> Void) {
+        lock.lock()
+        pending.append(work)
+        lock.unlock()
+    }
+
+    func drain() {
+        lock.lock()
+        let work = pending
+        pending.removeAll(keepingCapacity: true)
+        lock.unlock()
+
+        for item in work {
+            item()
+        }
+    }
+}
+
+struct CNSQueue<Element> {
+    private var items: [Element]
+    private var head = 0
+
+    init(_ items: [Element] = []) {
+        self.items = items
+    }
+
+    var count: Int {
+        items.count - head
+    }
+
+    var isEmpty: Bool {
+        count == 0
+    }
+
+    mutating func append(_ item: Element) {
+        items.append(item)
+    }
+
+    mutating func popFirst() -> Element? {
+        guard head < items.count else { return nil }
+        let item = items[head]
+        head += 1
+
+        if head > 64 && head * 2 >= items.count {
+            items.removeFirst(head)
+            head = 0
+        }
+
+        return item
+    }
 }
 
 // MARK: - Stimulation context store (TS `ICNSStimulationContextStore`; class instances as keys)
@@ -341,7 +397,7 @@ public struct CNSStimulationOptions<TIn, TOut> {
     public var modality: CNSModality?
     public var afferentPath: CNSAfferentPath?
     public var stimulationContext: Any?
-    /// Dispatches async `CNSEventual.future` completions; defaults to a global queue.
+    /// Accepts async `CNSEventual.future` completions before CNS drains them on its serial stimulation lane.
     public var continuationScheduler: CNSScheduler?
 
     public init(
@@ -431,6 +487,7 @@ public final class CNSNetwork {
     public private(set) var stronglyConnectedComponents: [Set<CNSNeuron>] = []
     private var neuronToSCC: [ObjectIdentifier: Int] = [:]
     private var sccDag: [Int: Set<Int>] = [:]
+    private var sccOutgoingDag: [Int: Set<Int>] = [:]
     private var sccAncestors: [Int: Set<Int>] = [:]
 
     private var subIndex: [ObjectIdentifier: [(CNSNeuron, CNSDendrite)]] = [:]
@@ -494,34 +551,63 @@ public final class CNSNetwork {
         var components: [Set<ObjectIdentifier>] = []
         var currentIndex = 0
 
-        func strongConnect(_ v: ObjectIdentifier) {
+        func visit(_ v: ObjectIdentifier) {
             index[v] = currentIndex
             lowlink[v] = currentIndex
             currentIndex += 1
             stack.append(v)
             onStack.insert(v)
-            for w in graphOID[v] ?? [] {
-                if index[w] == nil {
-                    strongConnect(w)
-                    lowlink[v] = min(lowlink[v]!, lowlink[w]!)
-                } else if onStack.contains(w) {
-                    lowlink[v] = min(lowlink[v]!, index[w]!)
+        }
+
+        struct Frame {
+            let v: ObjectIdentifier
+            let neighbors: [ObjectIdentifier]
+            var nextIndex: Int
+        }
+
+        func strongConnectIterative(_ start: ObjectIdentifier) {
+            visit(start)
+            var frames = [Frame(v: start, neighbors: Array(graphOID[start] ?? []), nextIndex: 0)]
+
+            while !frames.isEmpty {
+                let topIndex = frames.count - 1
+                var frame = frames[topIndex]
+
+                if frame.nextIndex < frame.neighbors.count {
+                    let w = frame.neighbors[frame.nextIndex]
+                    frame.nextIndex += 1
+                    frames[topIndex] = frame
+
+                    if index[w] == nil {
+                        visit(w)
+                        frames.append(Frame(v: w, neighbors: Array(graphOID[w] ?? []), nextIndex: 0))
+                    } else if onStack.contains(w) {
+                        lowlink[frame.v] = min(lowlink[frame.v]!, index[w]!)
+                    }
+                    continue
                 }
-            }
-            if lowlink[v] == index[v] {
-                var component = Set<ObjectIdentifier>()
-                var w: ObjectIdentifier
-                repeat {
-                    w = stack.removeLast()
-                    onStack.remove(w)
-                    component.insert(w)
-                } while w != v
-                components.append(component)
+
+                _ = frames.removeLast()
+
+                if lowlink[frame.v] == index[frame.v] {
+                    var component = Set<ObjectIdentifier>()
+                    var w: ObjectIdentifier
+                    repeat {
+                        w = stack.removeLast()
+                        onStack.remove(w)
+                        component.insert(w)
+                    } while w != frame.v
+                    components.append(component)
+                }
+
+                if let parent = frames.last?.v {
+                    lowlink[parent] = min(lowlink[parent]!, lowlink[frame.v]!)
+                }
             }
         }
 
         for v in neuronIds where index[v] == nil {
-            strongConnect(v)
+            strongConnectIterative(v)
         }
 
         stronglyConnectedComponents = components.map { oidSet in
@@ -540,15 +626,19 @@ public final class CNSNetwork {
 
     private func buildSCCDAG(graphOID: [ObjectIdentifier: Set<ObjectIdentifier>]) {
         sccDag.removeAll()
-        for i in 0..<stronglyConnectedComponents.count { sccDag[i] = [] }
+        sccOutgoingDag.removeAll()
+        for i in 0..<stronglyConnectedComponents.count {
+            sccDag[i] = []
+            sccOutgoingDag[i] = []
+        }
         for (i, scc) in stronglyConnectedComponents.enumerated() {
             for neuron in scc {
                 let oid = ObjectIdentifier(neuron)
                 for neighborOID in graphOID[oid] ?? [] {
-                    guard let neighbor = neurons.first(where: { ObjectIdentifier($0) == neighborOID }),
-                          let neighborScc = neuronToSCC[ObjectIdentifier(neighbor)],
+                    guard let neighborScc = neuronToSCC[neighborOID],
                           neighborScc != i else { continue }
                     sccDag[neighborScc, default: []].insert(i)
+                    sccOutgoingDag[i, default: []].insert(neighborScc)
                 }
             }
         }
@@ -558,16 +648,15 @@ public final class CNSNetwork {
         sccAncestors.removeAll()
         for i in 0..<stronglyConnectedComponents.count { sccAncestors[i] = [] }
         var inDegree: [Int: Int] = [:]
-        var queue: [Int] = []
+        var queue = CNSQueue<Int>()
         for i in 0..<stronglyConnectedComponents.count {
             let incoming = sccDag[i]?.count ?? 0
             inDegree[i] = incoming
             if incoming == 0 { queue.append(i) }
         }
         while !queue.isEmpty {
-            let current = queue.removeFirst()
-            let outgoing = getOutgoingEdges(sccIndex: current)
-            for neighbor in outgoing {
+            guard let current = queue.popFirst() else { break }
+            for neighbor in sccOutgoingDag[current] ?? [] {
                 var set = sccAncestors[neighbor] ?? []
                 set.insert(current)
                 if let currAnc = sccAncestors[current] { set.formUnion(currAnc) }
@@ -577,14 +666,6 @@ public final class CNSNetwork {
                 if newIn == 0 { queue.append(neighbor) }
             }
         }
-    }
-
-    private func getOutgoingEdges(sccIndex: Int) -> Set<Int> {
-        var outgoing = Set<Int>()
-        for (target, incoming) in sccDag where incoming.contains(sccIndex) {
-            outgoing.insert(target)
-        }
-        return outgoing
     }
 
     public func getSCCSet(neuron: CNSNeuron) -> Set<CNSNeuron>? {
@@ -735,6 +816,7 @@ public final class CNS: ICNS {
     public let network: CNSNetwork
     fileprivate let instanceNeuronQueue = CNSInstanceNeuronQueue()
     private let defaultContinuationScheduler: CNSScheduler
+    private let stimulationLock = NSRecursiveLock()
 
     public struct CNSAnyResponse {
         public let inputSignal: Any?
@@ -750,7 +832,7 @@ public final class CNS: ICNS {
 
     private var globalListeners: [(_ r: CNSAnyResponse) -> Void] = []
 
-    public init(_ neurons: [CNSNeuron], options: CNSOptions? = nil, continuationScheduler: CNSScheduler = CNSAsyncScheduler()) {
+    public init(_ neurons: [CNSNeuron], options: CNSOptions? = nil, continuationScheduler: CNSScheduler = CNSSerialScheduler()) {
         self.neurons = neurons
         self.options = options
         self.network = CNSNetwork(neurons: neurons)
@@ -808,10 +890,14 @@ public final class CNS: ICNS {
     /// Primary stimulation entry (TS `stimulate`).
     @discardableResult
     public func stimulate<TIn, TOut>(_ signal: CNSSignal<TIn>, _ options: CNSStimulationOptions<TIn, TOut> = .init()) -> CNSStimulation {
+        stimulationLock.lock()
+        defer { stimulationLock.unlock() }
+
         let stimulation = CNSStimulation(cns: self)
         stimulation.attachOptions(options)
         let ctxStore = options.ctx ?? CNSStimulationContextStore()
         let scheduler = continuationScheduler(for: options)
+        let continuationQueue = CNSContinuationQueue()
         let onResp = wrapOnResponse(
             options.onResponse,
             modality: options.modality,
@@ -820,7 +906,7 @@ public final class CNS: ICNS {
             hopsProvider: { nil }
         )
 
-        var queue: [any CNSAnySignalProtocol] = [signal as any CNSAnySignalProtocol]
+        var queue = CNSQueue<any CNSAnySignalProtocol>([signal as any CNSAnySignalProtocol])
         var inFlight = 0
         var activeSccCounts: [Int: Int] = [:]
         var neuronVisitCounts: [ObjectIdentifier: Int] = [:]
@@ -903,10 +989,11 @@ public final class CNS: ICNS {
         ))
 
         while true {
+            continuationQueue.drain()
             if options.abortSignal?.isAborted == true { break }
             let anySig: (any CNSAnySignalProtocol)?
             if !queue.isEmpty {
-                anySig = queue.removeFirst()
+                anySig = queue.popFirst()
             } else if inFlight > 0 {
                 wake.wait()
                 continue
@@ -989,8 +1076,10 @@ public final class CNS: ICNS {
                                 inFlight += 1
                                 producer { v in
                                     scheduler.perform {
-                                        inFlight = max(0, inFlight - 1)
-                                        handleImmediate(v)
+                                        continuationQueue.enqueue {
+                                            inFlight = max(0, inFlight - 1)
+                                            handleImmediate(v)
+                                        }
                                         wake.signal()
                                     }
                                 }
@@ -1002,6 +1091,7 @@ public final class CNS: ICNS {
                 }
             }
         }
+        continuationQueue.drain()
 
         if options.abortSignal?.isAborted == true {
             stimulation.failQueuedTasks(
@@ -1028,6 +1118,9 @@ public final class CNS: ICNS {
     /// TS `stimulate` with multiple seed signals.
     @discardableResult
     public func stimulate<TIn, TOut>(_ signals: [CNSSignal<TIn>], _ options: CNSStimulationOptions<TIn, TOut> = .init()) -> CNSStimulation {
+        stimulationLock.lock()
+        defer { stimulationLock.unlock() }
+
         guard !signals.isEmpty else {
             let stimulation = CNSStimulation(cns: self)
             stimulation.markComplete()
@@ -1037,6 +1130,7 @@ public final class CNS: ICNS {
         stimulation.attachOptions(options)
         let ctxStore = options.ctx ?? CNSStimulationContextStore()
         let scheduler = continuationScheduler(for: options)
+        let continuationQueue = CNSContinuationQueue()
         let onResp = wrapOnResponse(
             options.onResponse,
             modality: options.modality,
@@ -1045,7 +1139,7 @@ public final class CNS: ICNS {
             hopsProvider: { nil }
         )
 
-        var queue: [any CNSAnySignalProtocol] = signals.map { $0 as any CNSAnySignalProtocol }
+        var queue = CNSQueue<any CNSAnySignalProtocol>(signals.map { $0 as any CNSAnySignalProtocol })
         var inFlight = 0
         var activeSccCounts: [Int: Int] = [:]
         var neuronVisitCounts: [ObjectIdentifier: Int] = [:]
@@ -1122,10 +1216,11 @@ public final class CNS: ICNS {
         }
 
         while true {
+            continuationQueue.drain()
             if options.abortSignal?.isAborted == true { break }
             let anySig: (any CNSAnySignalProtocol)?
             if !queue.isEmpty {
-                anySig = queue.removeFirst()
+                anySig = queue.popFirst()
             } else if inFlight > 0 {
                 wake.wait()
                 continue
@@ -1208,8 +1303,10 @@ public final class CNS: ICNS {
                                 inFlight += 1
                                 producer { v in
                                     scheduler.perform {
-                                        inFlight = max(0, inFlight - 1)
-                                        handleImmediate(v)
+                                        continuationQueue.enqueue {
+                                            inFlight = max(0, inFlight - 1)
+                                            handleImmediate(v)
+                                        }
                                         wake.signal()
                                     }
                                 }
@@ -1221,6 +1318,7 @@ public final class CNS: ICNS {
                 }
             }
         }
+        continuationQueue.drain()
 
         if options.abortSignal?.isAborted == true {
             stimulation.failQueuedTasks(
@@ -1255,10 +1353,14 @@ public final class CNS: ICNS {
             return stimulate(wrappedSignals, options)
         }
 
+        stimulationLock.lock()
+        defer { stimulationLock.unlock() }
+
         let stimulation = CNSStimulation(cns: self)
         stimulation.attachOptions(options)
         let ctxStore = options.ctx ?? CNSStimulationContextStore()
         let scheduler = continuationScheduler(for: options)
+        let continuationQueue = CNSContinuationQueue()
         let onResp = wrapOnResponse(
             options.onResponse,
             modality: options.modality,
@@ -1267,7 +1369,7 @@ public final class CNS: ICNS {
             hopsProvider: { nil }
         )
 
-        var queue: [any CNSAnySignalProtocol] = []
+        var queue = CNSQueue<any CNSAnySignalProtocol>()
         var inFlight = 0
         var activeSccCounts: [Int: Int] = [:]
         var neuronVisitCounts: [ObjectIdentifier: Int] = [:]
@@ -1401,8 +1503,10 @@ public final class CNS: ICNS {
                             inFlight += 1
                             producer { v in
                                 scheduler.perform {
-                                    inFlight = max(0, inFlight - 1)
-                                    handleImmediate(v)
+                                    continuationQueue.enqueue {
+                                        inFlight = max(0, inFlight - 1)
+                                        handleImmediate(v)
+                                    }
                                     wake.signal()
                                 }
                             }
@@ -1421,10 +1525,11 @@ public final class CNS: ICNS {
         }
 
         while true {
+            continuationQueue.drain()
             if options.abortSignal?.isAborted == true { break }
             let anySig: (any CNSAnySignalProtocol)?
             if !queue.isEmpty {
-                anySig = queue.removeFirst()
+                anySig = queue.popFirst()
             } else if inFlight > 0 {
                 wake.wait()
                 continue
@@ -1439,6 +1544,7 @@ public final class CNS: ICNS {
                 processDirect(neuron: neuron, dendrite: dendrite, sig: sig)
             }
         }
+        continuationQueue.drain()
 
         onResp(CNSAnyResponse(
             inputSignal: nil,

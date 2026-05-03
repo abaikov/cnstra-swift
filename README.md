@@ -152,7 +152,7 @@ let opts = CNSStimulationOptions<Int, String>(
     abortSignal: abort,
     maxNeuronHops: 10,
     concurrency: 4,
-    continuationScheduler: CNSAsyncScheduler()
+    continuationScheduler: CNSSerialScheduler()
 )
 
 _ = cns.stimulate(input.createSignal(5), opts)
@@ -168,7 +168,7 @@ Options:
 - `modality`: selected modality object
 - `afferentPath`: selected afferent path object
 - `stimulationContext`: arbitrary user context
-- `continuationScheduler`: where `CNSEventual.future` completions resume
+- `continuationScheduler`: where `CNSEventual.future` completion callbacks are accepted before CNS resumes them on its serial stimulation lane
 
 Global options:
 
@@ -178,6 +178,23 @@ let cns = CNS(
     options: CNSOptions(autoCleanupContexts: true)
 )
 ```
+
+## Execution Model
+
+CNStra keeps orchestration serial by default. A `CNS` instance runs routing, context mutation, activation task state, cleanup, and response listeners on one stimulation lane.
+
+This is intentional: dendrites should be small orchestration steps. If a dendrite needs CPU-heavy or blocking work, move that work outside CNS with Swift concurrency or a queue, then return the result through `CNSEventual.future`.
+
+```swift
+return CNSEventual.future { complete in
+    Task.detached {
+        let result = expensiveWork()
+        complete(output.createSignal(result))
+    }
+}
+```
+
+Future completion callbacks may arrive from any thread. CNS accepts them through the configured `continuationScheduler`, then drains the resulting signals back on the same serial stimulation lane.
 
 ## Signal Flow Patterns
 
@@ -331,11 +348,11 @@ let worker = CNSNeuron(
 )
 ```
 
-`continuationScheduler` controls where future completions are handled:
+`continuationScheduler` controls where future completion callbacks are accepted. CNS then drains those completions back on the stimulation lane, so routing, context mutation, task state, and response listeners stay serial.
 
 ```swift
 let opts = CNSStimulationOptions<Int, String>(
-    continuationScheduler: CNSAsyncScheduler()
+    continuationScheduler: CNSSerialScheduler()
 )
 ```
 
@@ -435,10 +452,23 @@ let parent = cns.network.getParentNeuron(forCollateral: output)
 Performance notes:
 
 - Routing is identity-based and deterministic.
-- `CNSEventual.future` is non-blocking and posts back into the same run.
+- CNS runs routing, context mutation, task state, and listeners on one serial stimulation lane.
+- `CNSEventual.future` lets user code do work elsewhere and posts the result back into the same run.
 - `concurrency` on `CNSNeuron` gates work for that neuron across runs.
 - `CNSStimulationOptions.concurrency` gates work inside a single run.
 - `autoCleanupContexts` can reduce retained context values in larger cyclic graphs.
+
+Run the optional release-mode routing smoke test with:
+
+```bash
+CNS_PERF_SMOKE=1 swift test -c release --filter CoreSwiftTests/testPerfSmokeRoutingThroughput
+```
+
+Run the optional deep-chain stack smoke test with:
+
+```bash
+CNS_DEEP_STACK_SMOKE=1 swift test -c release --filter CoreSwiftTests/testDeepSignalChainDoesNotOverflowCallStack
+```
 
 ## Error Handling
 
@@ -475,12 +505,13 @@ let failed = stimulation.getFailedTasks()
 
 SwiftPM package versions are git tags. `Package.swift` does not contain the library version.
 
-After a release commit, create and push a semver tag, for example:
+After a release commit, run the release script with the next semver version:
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+scripts/release.sh 1.1.0
 ```
+
+The script requires a clean working tree, fast-forwards `master` to the current commit, runs `swift test`, pushes `master`, then creates and pushes the annotated tag.
 
 ---
 
