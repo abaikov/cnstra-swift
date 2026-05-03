@@ -47,7 +47,7 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 
 START_REF="$(git rev-parse --verify HEAD)"
-START_BRANCH="$(git branch --show-current || true)"
+START_BRANCH="$(git rev-parse --abbrev-ref HEAD || true)"
 
 echo "Preparing release ${TAG}"
 echo "Start ref: ${START_REF}"
@@ -66,7 +66,7 @@ if git ls-remote --exit-code --tags "$RELEASE_REMOTE" "refs/tags/${TAG}" >/dev/n
   exit 1
 fi
 
-git switch "$RELEASE_BRANCH"
+git checkout "$RELEASE_BRANCH"
 git merge --ff-only "${RELEASE_REMOTE}/${RELEASE_BRANCH}"
 git merge --ff-only "$START_REF"
 
